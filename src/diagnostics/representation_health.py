@@ -314,6 +314,44 @@ def classify_health(raw, proj, healthy_raw, healthy_proj, cfg=None):
                     "near_healthy": bool(near_healthy)}
 
 
+def collapse_trend(eff_rank_fracs, min_points=3, decline_frac=0.25):
+    """Early-warning TRAJECTORY readout over successive validations' eff_rank_frac.
+
+    Motivation (documented failures, not conjecture): both real Kaggle screening
+    phases collapsed (EXPERIMENT_LOG.md Phase 0/1), and the collapse signature in
+    arXiv:2607.23531 (abstract scraped and read 2026-09-02; RE-CHECK before citing
+    in a REPORT.md, Standing Rule 4) shows effective-rank degeneration PRECEDES
+    the point where per-validation vote thresholds fire. This function makes that
+    precursor visible across validations.
+
+    Log-only by design: it NEVER feeds classify_health/classify_failure_mode —
+    changing classification thresholds is a Standing-Rule-3 operator decision.
+
+    eff_rank_fracs: chronological eff_rank_frac values (NaN entries from n<2
+    batches are skipped). With fewer than `min_points` valid values the verdict is
+    "insufficient_history". Otherwise the relative change across the window is
+    compared to `decline_frac`: a drop larger than that fraction flags
+    early_warning=True (the run is trending toward the vote thresholds even
+    though no single validation may yet be COLLAPSED).
+    """
+    vals = [v for v in eff_rank_fracs
+            if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    if len(vals) < min_points:
+        return {"trend": "insufficient_history", "n": len(vals),
+                "early_warning": False, "first": None, "last": None,
+                "rel_change": None}
+    first, last = vals[0], vals[-1]
+    rel_change = (last - first) / max(abs(first), 1e-9)
+    if rel_change < -decline_frac:
+        trend = "declining"
+    elif rel_change > decline_frac:
+        trend = "rising"
+    else:
+        trend = "stable"
+    return {"trend": trend, "n": len(vals), "early_warning": trend == "declining",
+            "first": first, "last": last, "rel_change": rel_change}
+
+
 # ---------------------------------------------------------------------------
 # five-way collapse classification (architecture-repair spec §26)
 # ---------------------------------------------------------------------------

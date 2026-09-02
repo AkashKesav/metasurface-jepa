@@ -45,6 +45,7 @@ from data.dataset import MetaDiTDataset, collate_batch
 from data.mask import BlockMasker
 from assembly import build_model, saveable_state_dict
 from losses.objectives import build_objective
+from diagnostics.representation_health import collapse_trend
 from runtime.device import resolve_device, assert_module_device
 from train.engine import (collect_ema_state, save_checkpoint, load_checkpoint,
                           healthy_references)
@@ -143,6 +144,10 @@ def _jepa_fixed_val_metrics(model, objective, fixed_vals, refs_model, need_null=
         ratio_key = f"cos_err_r{r:g}"
         metrics[ratio_key] = m.get(ratio_key, m.get("cos_err_r0.5", 0.0))
         metrics[f"health_r{r:g}"] = health["status"]
+        # Numeric EMA-target effective-rank fraction per validation: the raw
+        # material for collapse_trend()'s early-warning trajectory (rank
+        # degeneration precedes the per-validation collapse votes).
+        metrics[f"eff_rank_r{r:g}"] = health["raw"].get("eff_rank_frac")
         if need_null:
             gap_metrics = fv.null_gap(model, objective)
             metrics.update(gap_metrics)
@@ -387,6 +392,9 @@ def main():
     loss_accum = 0.0
     comp_sums, comp_counts = {}, {}
     sigreg_info = None
+    # Effective-rank trajectory across validations (log-only early warning;
+    # in-memory only — a resumed run rebuilds history from its first validation).
+    rank_history = []
 
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
@@ -474,6 +482,13 @@ def main():
                             best_healthy_prediction = {"primary": primary, "metrics": val_metrics,
                                                        "step": step, "health": val_health}
                 print(f"  [val @ step {step}] {json.dumps(val_metrics)}")
+                rank_history.append(val_metrics.get(f"eff_rank_r{ratios[0]:g}"))
+                trend = collapse_trend(rank_history)
+                if trend["early_warning"]:
+                    print(f"  [collapse-trend WARNING @ step {step}] "
+                          f"eff_rank {trend['first']:.4g} -> {trend['last']:.4g} "
+                          f"(rel {trend['rel_change']:+.1%}): rank degeneration "
+                          f"precedes collapse votes — inspect before continuing")
 
             is_epoch_end = (bi == len(loader) - 1)
             next_batch_index = 0 if is_epoch_end else bi + 1
