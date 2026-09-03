@@ -44,7 +44,7 @@ from data.factorize import factorize_geometry, assemble_geometry
 from data.mask import BlockMasker
 from assembly import build_unified_model, load_into_model, set_spectrum_path
 from predictor.guidance import goal_dropout
-from physics.physics_loop import load_surrogate, physics_loss
+from physics.physics_loop import load_surrogate, physics_loss, physics_loss_from_out
 from losses.unified_losses import UnifiedJEPALoss
 from runtime.reproducibility import set_seed, collect_rng_state, restore_rng_state
 from runtime.device import resolve_device
@@ -471,6 +471,177 @@ def validate(model, objective, val_batches, cfg, device):
     return out
 
 
+def validate_suite(model, objective, val_batches, cfg, device):
+    """Evaluate the unified model on the configured task matrix.
+
+    This is intentionally separate from the old single-stratum ``validate``
+    helper so existing smoke tests retain their compact flat output.  Real
+    runs use this suite and report every configured occupancy-mask ratio and
+    scalar-visibility regime.  Ratio 0 is a forward-only reference because
+    VICReg statistics are undefined when there are no masked tokens.
+
+    Physics is evaluated for both the differentiable soft occupancy and the
+    thresholded hard occupancy.  The same frozen surrogate is used for the
+    lambda_phys=0 baseline, making the baseline/fixed comparison meaningful.
+    """
+    from losses.vicreg import vicreg_branch_terms
+    from diagnostics.representation_health import eff_ranks
+
+    was_model_training = model.training
+    was_objective_training = objective.training
+    model.eval()
+    objective.eval()
+
+    cur = cfg.get("curriculum", {})
+    ratios = cur.get("eval_mask_ratios")
+    if ratios is None:
+        ratios = [cur.get("val_mask_ratio", 0.5)]
+    ratios = [float(r) for r in ratios]
+    regimes = cur.get("eval_scalar_regimes", ["all_known", "all_unknown", "mixed"])
+    regime_flags = {
+        "all_known": lambda b: torch.ones(b, 3, dtype=torch.bool, device=device),
+        "all_unknown": lambda b: torch.zeros(b, 3, dtype=torch.bool, device=device),
+        "mixed": lambda b: torch.tensor(
+            [[True, False, True], [False, True, False]],
+            dtype=torch.bool, device=device).repeat((b + 1) // 2, 1)[:b],
+    }
+    unknown_regimes = [r for r in regimes if r not in regime_flags]
+    if unknown_regimes:
+        raise ValueError(f"unknown eval scalar regimes: {unknown_regimes}")
+
+    scenarios = []
+    try:
+        with torch.no_grad():
+            for ratio_index, ratio in enumerate(ratios):
+                masker = BlockMasker(
+                    placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=12345 + ratio_index)
+                for batch_index, (occ, sv, spec) in enumerate(val_batches):
+                    B = occ.shape[0]
+                    if ratio == 0.0:
+                        M = torch.ones(B, 16, 16, device=device)
+                    else:
+                        M = masker.sample(occ, ratio).to(device)
+                    for regime in regimes:
+                        sk = regime_flags[regime](B)
+                        out = model(occ, sv, sk, spec, M, goal_mode="real")
+                        masked = out["mask"]
+                        n_masked = int(masked.sum().item())
+                        row = {
+                            "mask_ratio": ratio,
+                            "scalar_regime": regime,
+                            "n_masked_tokens": n_masked,
+                            "raw_mse": None, "raw_cos_err": None,
+                            "proj_mse": None, "proj_cos_err": None,
+                            "L_inv": None, "L_var": None, "L_cov": None,
+                            "L_scalar": None, "L_total": None,
+                            "pred_eff_rank_frac": None,
+                            "target_eff_rank_frac": None,
+                            "scalar_mae_unknown": None,
+                            "physics_soft_loss": None,
+                            "physics_hard_loss": None,
+                            "spectrum_soft_mae": None,
+                            "spectrum_hard_mae": None,
+                            "spectrum_soft_mse": None,
+                            "spectrum_hard_mse": None,
+                            "hard_soft_spectrum_mae": None,
+                        }
+
+                        if n_masked >= 2:
+                            z_hat_m = out["z_hat"][masked]
+                            z_y_m = out["z_y_raw"][masked]
+                            p_hat_full = objective.projector(out["z_hat"])
+                            p_y_full = objective.projector(out["z_y_raw"])
+                            p_hat_m = p_hat_full[masked]
+                            p_y_m = p_y_full[masked]
+                            row.update({
+                                "raw_mse": float(torch.nn.functional.mse_loss(z_hat_m, z_y_m)),
+                                "raw_cos_err": float((1 - torch.nn.functional.cosine_similarity(
+                                    z_hat_m, z_y_m, dim=-1).clamp(min=0)).mean()),
+                                "proj_mse": float(torch.nn.functional.mse_loss(p_hat_m, p_y_m)),
+                                "proj_cos_err": float((1 - torch.nn.functional.cosine_similarity(
+                                    p_hat_m, p_y_m, dim=-1).clamp(min=0)).mean()),
+                            })
+                            L_inv, L_var, L_cov = vicreg_branch_terms(
+                                p_hat_m, p_y_m,
+                                gamma=objective.gamma, eps=objective.eps)
+                            row.update({
+                                "L_inv": float(L_inv), "L_var": float(L_var),
+                                "L_cov": float(L_cov),
+                                "pred_eff_rank_frac": float(eff_ranks(
+                                    out["z_hat"].mean(dim=1))["eff_rank_frac"]),
+                                "target_eff_rank_frac": float(eff_ranks(
+                                    out["z_y_raw"].mean(dim=1))["eff_rank_frac"]),
+                            })
+
+                        unknown = ~sk
+                        n_unknown = int(unknown.sum().item())
+                        if n_unknown:
+                            row["scalar_mae_unknown"] = float(
+                                (out["scalar_pred"] - sv).abs()[unknown].mean())
+                            row["L_scalar"] = row["scalar_mae_unknown"]
+                        if row["L_inv"] is not None:
+                            row["L_total"] = (
+                                objective.lambda_inv * row["L_inv"]
+                                + objective.lambda_var * row["L_var"]
+                                + objective.lambda_cov * row["L_cov"]
+                                + objective.lambda_scalar * (row["L_scalar"] or 0.0)
+                            )
+
+                        if objective.surrogate is not None:
+                            soft_loss, soft_spec, _ = physics_loss_from_out(
+                                model, out, objective.surrogate, occ, sv, sk,
+                                spec, M, loss_type="smooth_l1", use_ste=False,
+                                normalize=True)
+                            hard_loss, hard_spec, _ = physics_loss_from_out(
+                                model, out, objective.surrogate, occ, sv, sk,
+                                spec, M, loss_type="smooth_l1", use_ste=False,
+                                normalize=True, hard_forward=True)
+                            soft_mae = (soft_spec - spec).abs().mean()
+                            hard_mae = (hard_spec - spec).abs().mean()
+                            row.update({
+                                "physics_soft_loss": float(soft_loss),
+                                "physics_hard_loss": float(hard_loss),
+                                "spectrum_soft_mae": float(soft_mae),
+                                "spectrum_hard_mae": float(hard_mae),
+                                "spectrum_soft_mse": float((soft_spec - spec).pow(2).mean()),
+                                "spectrum_hard_mse": float((hard_spec - spec).pow(2).mean()),
+                                "hard_soft_spectrum_mae": float((hard_spec - soft_spec).abs().mean()),
+                            })
+                            if row["L_total"] is not None:
+                                row["L_total"] += objective.lambda_phys * row["physics_soft_loss"]
+                        scenarios.append(row)
+    finally:
+        model.train(was_model_training)
+        objective.train(was_objective_training)
+
+    def mean_key(rows, key):
+        vals = [r[key] for r in rows if r.get(key) is not None and math.isfinite(r[key])]
+        return float(np.mean(vals)) if vals else None
+
+    aggregate = {k: mean_key(scenarios, k) for k in (
+        "raw_mse", "raw_cos_err", "proj_mse", "proj_cos_err", "L_inv",
+        "L_var", "L_cov", "L_scalar", "L_total", "pred_eff_rank_frac",
+        "target_eff_rank_frac", "scalar_mae_unknown", "physics_soft_loss",
+        "physics_hard_loss", "spectrum_soft_mae", "spectrum_hard_mae",
+        "spectrum_soft_mse", "spectrum_hard_mse", "hard_soft_spectrum_mae")}
+    by_ratio = {}
+    for ratio in ratios:
+        rows = [r for r in scenarios if r["mask_ratio"] == ratio]
+        by_ratio[f"r{ratio:g}"] = {
+            "n": len(rows),
+            **{k: mean_key(rows, k) for k in aggregate},
+        }
+    rank_history = [r["pred_eff_rank_frac"] for r in scenarios
+                    if r["pred_eff_rank_frac"] is not None]
+    return {
+        "aggregate": aggregate,
+        "by_mask_ratio": by_ratio,
+        "scenarios": scenarios,
+        "pred_eff_rank_history": rank_history,
+    }
+
+
 # ---------------------------------------------------------------------------
 # main training loop
 # ---------------------------------------------------------------------------
@@ -529,7 +700,11 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     lambda_phys = loss_cfg.get("lambda_phys", 0.0)
     ramp_steps = cfg.get("staging", {}).get("lambda_phys_ramp_steps", 0)
     surrogate = None
-    if lambda_phys > 0:
+    # The baseline also loads the frozen surrogate when evaluation is enabled,
+    # so it receives the same decoded-geometry/spectrum diagnostics as the
+    # fixed run even though its physics term is not part of optimization.
+    eval_physics = cfg.get("train", {}).get("eval_physics", True)
+    if lambda_phys > 0 or eval_physics:
         # Fix 3 (spec §5): a real-mode run that requests physics loss but
         # cannot load the surrogate must FAIL LOUDLY, never silently continue
         # with a zero placeholder physics term. Smoke mode keeps its explicit
@@ -538,7 +713,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         if surrogate_path and os.path.exists(surrogate_path):
             surrogate = load_surrogate(surrogate_path, device=device)
             print(f"[phase4] Loaded frozen surrogate from {surrogate_path}")
-        elif not use_synthetic_smoke:
+        elif lambda_phys > 0 and not use_synthetic_smoke:
             raise RuntimeError(
                 f"lambda_phys={lambda_phys} > 0 but surrogate checkpoint "
                 f"missing at {surrogate_path!r}. Refusing to run a physics "
@@ -547,7 +722,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                 "pass --use-synthetic-smoke for an explicit local smoke run.")
         else:
             print(f"[phase4] SMOKE: surrogate not found at {surrogate_path}, "
-                  f"physics loss inactive (explicit smoke mode only)")
+                  f"physics evaluation unavailable")
     objective = UnifiedJEPALoss(
         hidden=cfg["hidden"],
         lambda_inv=loss_cfg.get("lambda_inv", 25.0),
@@ -705,6 +880,13 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         else iter(loader)
 
     last_loss = None
+    validation_history = []
+    rank_history = []
+    output_dir = cfg.get("train", {}).get(
+        "output_dir", os.path.join(REPO_ROOT, "checkpoints", "unified"))
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(REPO_ROOT, output_dir)
+    os.makedirs(output_dir, exist_ok=True)
     for step in range(start_step, total_steps):
         # Phase 4 MD §4.1: ramp lambda_phys from 0 to target over ramp steps
         if ramp_steps > 0:
@@ -776,14 +958,17 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
 
         if step % val_every == 0 and step > 0:
-            val_metrics = validate(model, objective, val_batches, cfg, device)
+            val_metrics = validate_suite(model, objective, val_batches, cfg, device)
+            validation_history.append({"step": step, **val_metrics})
+            rank_history.extend(val_metrics.get("pred_eff_rank_history", []))
+            from diagnostics.representation_health import collapse_trend
+            val_metrics["collapse_trend"] = collapse_trend(rank_history)
             print(f"  [val] {json.dumps(val_metrics)}")
             model.train()
             objective.train()
 
         if step % ckpt_every == 0 and step > 0:
-            ckpt_path = os.path.join(
-                REPO_ROOT, "checkpoints", "unified", "latest.pt")
+            ckpt_path = os.path.join(output_dir, "latest.pt")
             os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
             ema_state = collect_ema_state(model)
             save_checkpoint(
@@ -798,7 +983,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             print(f"  [ckpt] saved to {ckpt_path}")
 
     # Final checkpoint
-    ckpt_path = os.path.join(REPO_ROOT, "checkpoints", "unified", "final.pt")
+    ckpt_path = os.path.join(output_dir, "final.pt")
     os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
     ema_state = collect_ema_state(model)
     save_checkpoint(
@@ -812,10 +997,33 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         device=device, artifact_type="final")
 
     report = {
+        "architecture_id": "unified_occ_param_spectrum_jepa_v1",
+        "output_dir": output_dir,
+        "lambda_phys_target": lambda_phys,
+        "lambda_phys_ramp_steps": ramp_steps,
         "final_step": total_steps - 1,
         "final_loss": last_loss if last_loss else 0.0,
         "regime_report": regime_logger.report(),
+        "validation_history": validation_history,
+        "collapse_trend": (collapse_trend(rank_history)
+                            if rank_history else {"trend": "insufficient_history"}),
     }
+    report_path = os.path.join(output_dir, "REPORT.md")
+    report_json_path = os.path.join(output_dir, "REPORT.json")
+    with open(report_json_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("# Unified JEPA run report\n\n")
+        f.write(f"- Architecture: `{report['architecture_id']}`\n")
+        f.write(f"- Physics weight: `{lambda_phys}`; ramp: `{ramp_steps}` steps\n")
+        f.write(f"- Final step: `{report['final_step']}`; final loss: `{report['final_loss']}`\n")
+        f.write(f"- Checkpoint directory: `{output_dir}`\n\n")
+        f.write("## Validation history\n\n```json\n")
+        json.dump(validation_history, f, indent=2)
+        f.write("\n```\n\n## Collapse trend\n\n```json\n")
+        json.dump(report["collapse_trend"], f, indent=2)
+        f.write("\n```\n")
+    print(f"[report] wrote {report_path}")
     return report
 
 
@@ -1079,6 +1287,12 @@ def main():
                         help="Forward-only smoke test (Phase 3 MD §5 stage A)")
     parser.add_argument("--device", type=str, default=None,
                         help="Override device (e.g. 'cpu' or 'cuda')")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Run-specific checkpoint/report directory")
+    parser.add_argument("--lambda-phys", type=float, default=None,
+                        help="Override target physics-loss weight for this run")
+    parser.add_argument("--phys-ramp-steps", type=int, default=None,
+                        help="Override linear physics-loss ramp length")
     parser.add_argument("--use-synthetic-smoke", action="store_true",
                         help="EXPLICIT smoke mode: synthetic data + dummy "
                              "spectrum weights allowed. Never used for real "
@@ -1091,6 +1305,13 @@ def main():
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    if args.output_dir:
+        cfg.setdefault("train", {})["output_dir"] = args.output_dir
+    if args.lambda_phys is not None:
+        cfg.setdefault("loss", {})["lambda_phys"] = args.lambda_phys
+    if args.phys_ramp_steps is not None:
+        cfg.setdefault("staging", {})["lambda_phys_ramp_steps"] = args.phys_ramp_steps
 
     device = args.device or cfg["train"].get("device", "cpu")
 

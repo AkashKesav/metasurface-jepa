@@ -32,7 +32,7 @@ loss:
   lambda_var: 25.0      # VICReg variance penalty
   lambda_cov: 1.0       # VICReg covariance penalty
   lambda_scalar: 1.0    # scalar L1 on unknown positions
-  lambda_phys: 0.0      # physics loss — disabled until Phase 4 MD §4 activation
+  lambda_phys: 0.0      # baseline; fixed comparison overrides this to 0.1
   gamma: 1.0            # VICReg variance hinge threshold
   eps: 1.0e-4           # VICReg numerical epsilon
 
@@ -51,6 +51,9 @@ curriculum:
   mask_placement: random      # "random" or "half_sensitivity" (architecture_v5.md §2)
   scalar_regimes: ["all_known", "all_unknown", "mixed"]
   scalar_regime_probs: [0.34, 0.33, 0.33]
+  # The real validation suite evaluates each of these explicitly.  The
+  # training curriculum above remains stochastic; evaluation is fixed.
+  eval_scalar_regimes: ["all_known", "all_unknown", "mixed"]
   # Phase 3 MD §4: easy (low mask + known scalars), hard (full mask + all unknown)
   easy_mask_ratio: 0.0
   hard_mask_ratio: 1.0
@@ -88,6 +91,7 @@ train:
   clip_grad_norm: 1.0
   seed: 42
   val_batches: 1
+  eval_physics: true    # load the frozen surrogate for baseline diagnostics too
   device: cpu
   # Phase 4 MD §3.5.1: classifier-free goal guidance
   guidance_dropout: 0.1   # probability of null-goal replacement during training

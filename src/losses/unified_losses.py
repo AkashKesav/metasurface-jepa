@@ -158,7 +158,8 @@ class UnifiedJEPALoss(nn.Module):
         self.physics_loss = PhysicsSpectrumLoss()
 
     def forward(self, model, occupancy, scalar_values, scalar_known,
-                spectrum, mask, goal_mode="real"):
+                spectrum, mask, goal_mode="real", compute_physics=False,
+                physics_hard_forward=False):
         out = model(
             occupancy, scalar_values, scalar_known, spectrum,
             mask, goal_mode=goal_mode,
@@ -190,12 +191,23 @@ class UnifiedJEPALoss(nn.Module):
         # physics_loop.physics_loss_from_out — exactly one student forward per
         # step, one physics decode, one surrogate forward (Fix 11). Delegates
         # to the single authoritative physics implementation.
-        if self.lambda_phys > 0 and self.surrogate is not None and model.training:
+        # ``compute_physics`` is used by validation.  Validation is deliberately
+        # in eval mode, but the frozen surrogate still needs to run so that a
+        # lambda_phys=0 baseline and a physics-enabled model are compared on
+        # the same decoded-geometry/spectrum metrics.
+        physics_active = (
+            self.surrogate is not None
+            and (model.training or compute_physics)
+        )
+        physics_geometry = None
+        physics_spectrum_pred = None
+        if physics_active:
             from physics.physics_loop import physics_loss_from_out
-            L_phys, _, _ = physics_loss_from_out(
+            L_phys, physics_spectrum_pred, physics_geometry = physics_loss_from_out(
                 model, out, self.surrogate, occupancy, scalar_values,
                 scalar_known, spectrum, mask, loss_type="smooth_l1",
-                use_ste=self.physics_use_ste, normalize=True)
+                use_ste=self.physics_use_ste if model.training else False,
+                normalize=True, hard_forward=physics_hard_forward)
         else:
             L_phys = self.physics_loss(
                 out.get("spectrum_target", spectrum), spectrum)
@@ -214,6 +226,9 @@ class UnifiedJEPALoss(nn.Module):
             "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
             "L_total": float(total.detach()),
         }
+        if physics_spectrum_pred is not None:
+            out["physics_spectrum_pred"] = physics_spectrum_pred
+            out["physics_geometry"] = physics_geometry
         return {
             "total_loss": total,
             "components": out["loss_components"],
