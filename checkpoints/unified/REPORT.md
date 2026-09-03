@@ -28,5 +28,22 @@ diagnostic limitation is that effective-rank estimation with the current
 two-sample validation batch saturates at approximately 0.5, so its collapse
 trend should not be used as a hard gate until the validation subset is larger.
 
+## Corrected collapse and null-goal rerun
+
+Commit `5c7f485` reran the baseline and `lambda_phys=0.1` pair with 16
+validation geometries, corrected sample-level rank estimation, and matched
+real/null-goal controls.
+
+| Run | Sample-rank trend | Final sample rank | Real hard MAE | Null hard MAE | Null-minus-real spectrum gain | Null-minus-real projected cosine gain |
+|---|---|---:|---:|---:|---:|---:|
+| Baseline | 0.3323 → 0.3727 (+12.16%) | 0.3727 | 0.8248 | 0.8244 | -0.000410 | +0.000189 |
+| Physics fixed, 0.1 | 0.3322 → 0.3527 (+6.16%) | 0.3527 | 0.3452 | 0.3452 | -0.000003 | -0.000013 |
+
+The corrected rank trend is stable and rising, with no early-warning decline;
+this run does **not** show representation collapse. However, the near-zero
+real/null differences show goal-ignoring collapse: the predictor is not using
+the spectrum condition. The physics term improves hard spectrum error at high
+masking, but it does not restore goal usage in this configuration.
+
 Raw Kaggle JSON artifacts are retained locally under `.kaggle_compare_results/`
 and `.kaggle_sweep_results/`.
