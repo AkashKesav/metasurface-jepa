@@ -509,6 +509,16 @@ def validate_suite(model, objective, val_batches, cfg, device):
     if unknown_regimes:
         raise ValueError(f"unknown eval scalar regimes: {unknown_regimes}")
 
+    if not val_batches:
+        raise ValueError("validation suite requires at least one validation batch")
+    # Rank diagnostics must see the whole fixed validation subset.  Computing
+    # effective rank on one batch of two geometries makes the number collapse
+    # to a two-sample SVD artifact (roughly 0.5), regardless of representation
+    # quality.  Concatenation also makes real-vs-null comparisons use identical
+    # samples and masks.
+    occ_all = torch.cat([b[0] for b in val_batches], dim=0).to(device)
+    sv_all = torch.cat([b[1] for b in val_batches], dim=0).to(device)
+    spec_all = torch.cat([b[2] for b in val_batches], dim=0).to(device)
     scenarios = []
     try:
         with torch.no_grad():
@@ -516,15 +526,16 @@ def validate_suite(model, objective, val_batches, cfg, device):
                 masker = BlockMasker(
                     placement="random", grid=16, min_side=3,
                     k_range=(1, 4), seed=12345 + ratio_index)
-                for batch_index, (occ, sv, spec) in enumerate(val_batches):
-                    B = occ.shape[0]
-                    if ratio == 0.0:
-                        M = torch.ones(B, 16, 16, device=device)
-                    else:
-                        M = masker.sample(occ, ratio).to(device)
-                    for regime in regimes:
-                        sk = regime_flags[regime](B)
-                        out = model(occ, sv, sk, spec, M, goal_mode="real")
+                occ, sv, spec = occ_all, sv_all, spec_all
+                B = occ.shape[0]
+                if ratio == 0.0:
+                    M = torch.ones(B, 16, 16, device=device)
+                else:
+                    M = masker.sample(occ, ratio).to(device)
+                for regime in regimes:
+                    sk = regime_flags[regime](B)
+                    out = model(occ, sv, sk, spec, M, goal_mode="real")
+                    if out is not None:
                         masked = out["mask"]
                         n_masked = int(masked.sum().item())
                         row = {
@@ -537,6 +548,8 @@ def validate_suite(model, objective, val_batches, cfg, device):
                             "L_scalar": None, "L_total": None,
                             "pred_eff_rank_frac": None,
                             "target_eff_rank_frac": None,
+                            "token_eff_rank_frac": None,
+                            "target_token_eff_rank_frac": None,
                             "scalar_mae_unknown": None,
                             "physics_soft_loss": None,
                             "physics_hard_loss": None,
@@ -545,6 +558,11 @@ def validate_suite(model, objective, val_batches, cfg, device):
                             "spectrum_soft_mse": None,
                             "spectrum_hard_mse": None,
                             "hard_soft_spectrum_mae": None,
+                            "null_proj_cos_err": None,
+                            "null_proj_mse": None,
+                            "goal_proj_cos_gain": None,
+                            "null_spectrum_hard_mae": None,
+                            "goal_spectrum_hard_gain": None,
                         }
 
                         if n_masked >= 2:
@@ -568,10 +586,20 @@ def validate_suite(model, objective, val_batches, cfg, device):
                             row.update({
                                 "L_inv": float(L_inv), "L_var": float(L_var),
                                 "L_cov": float(L_cov),
-                                "pred_eff_rank_frac": float(eff_ranks(
-                                    out["z_hat"].mean(dim=1))["eff_rank_frac"]),
-                                "target_eff_rank_frac": float(eff_ranks(
-                                    out["z_y_raw"].mean(dim=1))["eff_rank_frac"]),
+                                # Token rank uses all B*T token rows.  Sample
+                                # rank is kept separate and is the collapse
+                                # trend signal; it is unavailable for tiny
+                                # validation subsets rather than fabricated.
+                                "token_eff_rank_frac": float(eff_ranks(
+                                    out["z_hat"].reshape(-1, out["z_hat"].shape[-1]))["eff_rank_frac"]),
+                                "target_token_eff_rank_frac": float(eff_ranks(
+                                    out["z_y_raw"].reshape(-1, out["z_y_raw"].shape[-1]))["eff_rank_frac"]),
+                                "pred_eff_rank_frac": (float(eff_ranks(
+                                    out["z_hat"].mean(dim=1))["eff_rank_frac"])
+                                    if B >= 4 else None),
+                                "target_eff_rank_frac": (float(eff_ranks(
+                                    out["z_y_raw"].mean(dim=1))["eff_rank_frac"])
+                                    if B >= 4 else None),
                             })
 
                         unknown = ~sk
@@ -610,6 +638,29 @@ def validate_suite(model, objective, val_batches, cfg, device):
                             })
                             if row["L_total"] is not None:
                                 row["L_total"] += objective.lambda_phys * row["physics_soft_loss"]
+
+                        # Null-goal control: identical occupancy/scalars/masks,
+                        # with only the spectrum goal replaced by the model's
+                        # null token. Positive real-vs-null deltas mean the
+                        # predictor is using the spectrum condition.
+                        null_out = model(occ, sv, sk, spec, M, goal_mode="null")
+                        if n_masked >= 2:
+                            null_p_hat = objective.projector(null_out["z_hat"])[masked]
+                            null_p_y = objective.projector(null_out["z_y_raw"])[masked]
+                            row["null_proj_cos_err"] = float((1 - torch.nn.functional.cosine_similarity(
+                                null_p_hat, null_p_y, dim=-1).clamp(min=0)).mean())
+                            row["null_proj_mse"] = float(torch.nn.functional.mse_loss(
+                                null_p_hat, null_p_y))
+                            row["goal_proj_cos_gain"] = row["null_proj_cos_err"] - row["proj_cos_err"]
+                        if objective.surrogate is not None:
+                            _, null_hard_spec, _ = physics_loss_from_out(
+                                model, null_out, objective.surrogate, occ, sv, sk,
+                                spec, M, loss_type="smooth_l1", use_ste=False,
+                                normalize=True, hard_forward=True)
+                            row["null_spectrum_hard_mae"] = float(
+                                (null_hard_spec - spec).abs().mean())
+                            row["goal_spectrum_hard_gain"] = (
+                                row["null_spectrum_hard_mae"] - row["spectrum_hard_mae"])
                         scenarios.append(row)
     finally:
         model.train(was_model_training)
@@ -622,9 +673,12 @@ def validate_suite(model, objective, val_batches, cfg, device):
     aggregate = {k: mean_key(scenarios, k) for k in (
         "raw_mse", "raw_cos_err", "proj_mse", "proj_cos_err", "L_inv",
         "L_var", "L_cov", "L_scalar", "L_total", "pred_eff_rank_frac",
+        "token_eff_rank_frac", "target_token_eff_rank_frac",
         "target_eff_rank_frac", "scalar_mae_unknown", "physics_soft_loss",
         "physics_hard_loss", "spectrum_soft_mae", "spectrum_hard_mae",
-        "spectrum_soft_mse", "spectrum_hard_mse", "hard_soft_spectrum_mae")}
+        "spectrum_soft_mse", "spectrum_hard_mse", "hard_soft_spectrum_mae",
+        "null_proj_cos_err", "null_proj_mse", "goal_proj_cos_gain",
+        "null_spectrum_hard_mae", "goal_spectrum_hard_gain")}
     by_ratio = {}
     for ratio in ratios:
         rows = [r for r in scenarios if r["mask_ratio"] == ratio]

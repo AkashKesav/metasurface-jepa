@@ -90,7 +90,9 @@ train:
   ckpt_every_steps: 100
   clip_grad_norm: 1.0
   seed: 42
-  val_batches: 1
+  # Eight batches (16 geometries at batch_size=2) make sample-level rank
+  # diagnostics statistically meaningful; a two-sample SVD is not.
+  val_batches: 8
   eval_physics: true    # load the frozen surrogate for baseline diagnostics too
   device: cpu
   # Phase 4 MD §3.5.1: classifier-free goal guidance
