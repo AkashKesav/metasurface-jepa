@@ -107,6 +107,15 @@ The raw/projected diagnostic was consequential: raw latent MSE/cosine were
 This is the measured basis for the raw-alignment ablation now running at
 `lambda_raw=0.1`.
 
+The raw-alignment ablation completed with `lambda_phys=0.2` and
+`lambda_raw=0.1`. Final hard-stratum values were physics error `0.481385`,
+occupancy IoU/F1 `0.690780 / 0.815304`, geometry sensitivity `0.009340`,
+scalar normalized MAE `0.236065`, and zero scalar violations. Raw latent
+MSE/cosine improved only to `5.94996 / 0.00351`; projected MSE/cosine stayed
+at `0.00423 / 0.99732`. It did not improve the selected physics result, so
+`lambda_raw` remains an opt-in ablation rather than production configuration.
+Its goal-path gradient norm mean was `0.1084` (maximum `18.5349`).
+
 ## Provenance
 
 - repaired comparison commit: `9a108c9`;
