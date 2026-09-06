@@ -325,10 +325,15 @@ def main():
     # Each batch carries (occ, sv, spec, mask) so eval can permute spectrum.
     fixed_batches = []
     invalid_val_samples = 0
+    validation_sample_ids = []
+    val_offset = 0
     for G, S in vloader:
         valid = ((G[:, 0].amax(dim=(1, 2)) > 0) &
                  (G[:, 1].amax(dim=(1, 2)) > 0))
         invalid_val_samples += int((~valid).sum().item())
+        validation_sample_ids.extend(
+            (torch.arange(val_offset, val_offset + len(G))[valid]).tolist())
+        val_offset += len(G)
         if not valid.any():
             continue
         G, S = G[valid], S[valid]
@@ -469,6 +474,7 @@ def main():
             "total_steps": args.total_steps,
             "validation_stratum": "100_percent_occupancy_mask_all_scalars_unknown",
             "validation_batch_count": len(fixed_batches),
+            "validation_sample_ids": validation_sample_ids,
             "regime_report": regime_logger.report(),
             "goal_path_grad_norm_mean": float(np.mean(goal_grad_history)),
             "goal_path_grad_norm_max": float(np.max(goal_grad_history)),

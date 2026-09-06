@@ -116,6 +116,24 @@ at `0.00423 / 0.99732`. It did not improve the selected physics result, so
 `lambda_raw` remains an opt-in ablation rather than production configuration.
 Its goal-path gradient norm mean was `0.1084` (maximum `18.5349`).
 
+The final goal-margin rerun completed from commit `b8926b9` with all requested
+diagnostics and a verified five-part checkpoint. With `lambda_phys=0.8`,
+`lambda_goal=2.0`, and margin `0.01`, final values were:
+
+- physics real/null/shuffled: `0.442827 / 0.469963 / 0.484754`;
+- real-vs-shuffled geometry sensitivity: `0.013780`;
+- occupancy IoU/F1: `0.662521 / 0.795747`;
+- scalar normalized MAE: `0.234905`, out-of-range fraction `0`;
+- raw latent MSE/cosine: `6.2292 / -0.0579`;
+- projected latent MSE/cosine: `0.00405 / 0.99749`;
+- `c_physics`/`a_goal` cross-sample standard deviations:
+  `0.094129 / 0.104366`;
+- goal-path gradient norm mean/max: `0.1333 / 19.6669`.
+
+Gate D passes on this exploratory goal-margin run. Its checkpoint reassembled
+to `188,426,071` bytes with SHA-256
+`d6e8289725e6b3460ffd0d47892ca24cea9009409b157a0b3cda3a8075c4fd6d`.
+
 ## Provenance
 
 - repaired comparison commit: `9a108c9`;
