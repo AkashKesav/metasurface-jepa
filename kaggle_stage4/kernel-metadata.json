@@ -1,6 +1,6 @@
 {
   "id": "akashkesav/metasurface-jepa-stage-4-repaired-cuda",
-  "title": "Metasurface JEPA Stage 4 repaired objective",
+  "title": "Metasurface JEPA Stage 4 repaired CUDA",
   "code_file": "run_stage4.py",
   "language": "python",
   "kernel_type": "script",
