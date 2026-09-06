@@ -112,6 +112,8 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step):
             "geometry_sensitivity_null", "geometry_sensitivity_shuffled",
             "occupancy_iou", "occupancy_f1", "pred_occupancy_fraction",
             "true_occupancy_fraction", "scalar_out_of_range_fraction",
+            "scalar_mae", "scalar_normalized_mae", "scalar_pred_min",
+            "scalar_pred_max",
             "c_physics_cross_sample_std", "a_goal_cross_sample_std"]}
     for occ, sv, spec, M in batches:
         occ = occ.to(device); sv = sv.to(device)
@@ -167,6 +169,12 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step):
         agg["scalar_out_of_range_fraction"].append(float(
             ((out_r["scalar_pred"] < bounds[:, 0]) |
              (out_r["scalar_pred"] > bounds[:, 1])).float().mean()))
+        scalar_error = (out_r["scalar_pred"] - sv).abs()
+        scalar_scale = (bounds[:, 1] - bounds[:, 0]).clamp_min(1e-6)
+        agg["scalar_mae"].append(float(scalar_error.mean()))
+        agg["scalar_normalized_mae"].append(float((scalar_error / scalar_scale).mean()))
+        agg["scalar_pred_min"].append(float(out_r["scalar_pred"].min()))
+        agg["scalar_pred_max"].append(float(out_r["scalar_pred"].max()))
         agg["c_physics_cross_sample_std"].append(float(out_r["c_physics"].std(dim=0).mean()))
         agg["a_goal_cross_sample_std"].append(float(out_r["a_goal"].std(dim=0).mean()))
     out = {k: float(np.mean(v)) for k, v in agg.items()}
