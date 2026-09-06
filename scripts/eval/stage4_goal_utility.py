@@ -456,6 +456,7 @@ def main():
             "total_steps": args.total_steps,
             "validation_stratum": "100_percent_occupancy_mask_all_scalars_unknown",
             "validation_batch_count": len(fixed_batches),
+            "regime_report": regime_logger.report(),
             "checkpoint": str(out_dir / "latest.pt"),
             "checkpoint_manifest": checkpoint_manifest,
         }, f, indent=2)
