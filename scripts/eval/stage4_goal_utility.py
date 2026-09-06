@@ -49,7 +49,7 @@ from data.factorize import factorize_geometry
 from data.mask import BlockMasker
 from encoders.occupancy_encoder import OccupancyEncoder
 from losses.unified_losses import UnifiedJEPALoss, occupancy_reconstruction_metrics
-from physics.physics_loop import load_surrogate
+from physics.physics_loop import load_surrogate, physics_loss_from_out
 from runtime.reproducibility import set_seed
 from runtime.device import resolve_device
 from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
@@ -189,6 +189,10 @@ def main():
     ap.add_argument("--config", default=str(REPO_ROOT / "configs" / "unified.yaml"))
     ap.add_argument("--data-root", required=True)
     ap.add_argument("--lambda-phys", type=float, default=1.0)
+    ap.add_argument("--lambda-goal", type=float, default=0.0,
+                    help="exploratory real-vs-shuffled margin-loss weight")
+    ap.add_argument("--goal-margin", type=float, default=0.01,
+                    help="exploratory normalized-physics margin")
     ap.add_argument("--total-steps", type=int, default=1500)
     ap.add_argument("--eval-every", type=int, default=250)
     ap.add_argument("--output-dir", default=str(REPO_ROOT / "results" / "stage4"))
@@ -313,6 +317,20 @@ def main():
             masker, rng, regime_logger, surrogate=surrogate,
             scalar_masker_bank=scalar_bank)
         loss = result["total_loss"]
+        goal_term = loss.new_zeros(())
+        if args.lambda_goal > 0 and spec.shape[0] > 1:
+            # Derangement for the training batch: the requested target is
+            # changed while geometry, mask, and scalar-known state stay fixed.
+            goal_spec = torch.roll(spec, shifts=1, dims=0)
+            out_shuf = model(occ, sv, sk, goal_spec, M, goal_mode="real")
+            p_real, _, _ = physics_loss_from_out(
+                model, result["out"], surrogate, occ, sv, sk, spec, M,
+                loss_type="smooth_l1", use_ste=True, normalize=True)
+            p_shuf, _, _ = physics_loss_from_out(
+                model, out_shuf, surrogate, occ, sv, sk, spec, M,
+                loss_type="smooth_l1", use_ste=True, normalize=True)
+            goal_term = torch.relu(args.goal_margin + p_real - p_shuf)
+            loss = loss + args.lambda_goal * goal_term
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad] +
@@ -325,7 +343,8 @@ def main():
         if (step + 1) % cfg["train"].get("log_every_steps", 10) == 0:
             print(f"[step {step+1}/{args.total_steps}] "
                   f"L_total={result['components']['L_total']:.3f} "
-                  f"L_phys={result['components'].get('L_phys', 0):.3f}")
+                  f"L_phys={result['components'].get('L_phys', 0):.3f} "
+                  f"L_goal={float(goal_term.detach()):.4f}")
 
         if (step + 1) % args.eval_every == 0:
             m = eval_goal_utility(model, surrogate, fixed_batches, device, rng, step + 1)
@@ -369,6 +388,8 @@ def main():
             "config_sha256": config_sha,
             "dataset_root": str(data_root),
             "seed": args.seed,
+            "lambda_goal": args.lambda_goal,
+            "goal_margin": args.goal_margin,
             "invalid_val_samples_skipped": invalid_val_samples,
             "invalid_train_samples_skipped": invalid_train_samples,
             "total_steps": args.total_steps,
