@@ -76,6 +76,20 @@ the lambda sweep and recoverable checkpoint artifact remain outstanding.
 These must finish and produce recoverable artifacts before selecting a
 production weight or declaring the spectrum-conditioned gate passed.
 
+The repaired sweep completed from commit `c32a7cf`. Final hard-stratum results:
+
+| `lambda_phys` | real physics | shuffled physics | geometry sensitivity | occupancy IoU |
+|---:|---:|---:|---:|---:|
+| 0.1 | 0.499490 | 0.504335 | 0.012037 | 0.696715 |
+| 0.2 | 0.469160 | 0.478342 | 0.013855 | 0.690452 |
+| 0.4 | 0.495172 | 0.495261 | 0.001727 | 0.688401 |
+| 0.8 | 0.471492 | 0.470995 | 0.001846 | 0.647405 |
+
+`lambda_phys=0.2` is the selected exploratory point because it has the lowest
+real physics error and passes real-vs-shuffled. A same-setting rerun from the
+diagnostic/checkpoint-sharding commit is active as
+`akashkesav/metasurface-jepa-repaired-selected-lambda-v1`.
+
 ## Provenance
 
 - repaired comparison commit: `9a108c9`;
