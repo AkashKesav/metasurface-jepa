@@ -1,6 +1,6 @@
 {
-  "id": "akashkesav/metasurface-jepa-goal-margin-experiment-v2",
-  "title": "Metasurface JEPA goal margin experiment v2",
+  "id": "akashkesav/metasurface-jepa-goal-margin-experiment-v3",
+  "title": "Metasurface JEPA goal margin experiment v3",
   "code_file": "run_goal.py",
   "language": "python",
   "kernel_type": "script",
