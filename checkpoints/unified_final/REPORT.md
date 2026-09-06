@@ -76,6 +76,11 @@ the lambda sweep and recoverable checkpoint artifact remain outstanding.
 These must finish and produce recoverable artifacts before selecting a
 production weight or declaring the spectrum-conditioned gate passed.
 
+The goal-margin v2 rerun produced a five-part checkpoint whose reconstructed
+SHA-256 matched its manifest (`685d81e8bc096ee5576b72445484f47ea69fa1578d59b0ad7686d28055ec0fb3`).
+The selected-λ rerun likewise matched its manifest
+(`4b99b5f152f0db6d74797d3f5e41f649e432d3028d0fa265322e7c711569b7d3`).
+
 The repaired sweep completed from commit `c32a7cf`. Final hard-stratum results:
 
 | `lambda_phys` | real physics | shuffled physics | geometry sensitivity | occupancy IoU |
@@ -89,6 +94,18 @@ The repaired sweep completed from commit `c32a7cf`. Final hard-stratum results:
 real physics error and passes real-vs-shuffled. A same-setting rerun from the
 diagnostic/checkpoint-sharding commit is active as
 `akashkesav/metasurface-jepa-repaired-selected-lambda-v1`.
+
+The selected-λ rerun completed from commit `2605572` with a durable checkpoint
+manifest. Final step-1500 metrics were real/null/shuffled physics
+`0.476237 / 0.485890 / 0.481992`, occupancy IoU/F1 `0.697957 / 0.820264`,
+and real-vs-shuffled geometry sensitivity `0.010273`. Scalar normalized MAE
+was `0.236129` with zero out-of-range fraction. Goal-path gradient norm mean
+was `0.1310` (maximum `36.1642`).
+
+The raw/projected diagnostic was consequential: raw latent MSE/cosine were
+`6.0598 / -0.0343`, while projected MSE/cosine were `0.00436 / 0.99724`.
+This is the measured basis for the raw-alignment ablation now running at
+`lambda_raw=0.1`.
 
 ## Provenance
 
