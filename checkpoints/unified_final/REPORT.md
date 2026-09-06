@@ -60,6 +60,19 @@ Gate D: **FAIL** (`physics_real` is not below `physics_shuffled`).
 - `akashkesav/metasurface-jepa-repaired-physics-sweep-v1`: repaired
   `lambda_phys` sweep over `{0.1, 0.2, 0.4, 0.8}`.
 
+The goal-margin run completed with `lambda_phys=0.8`, exploratory
+`lambda_goal=2.0`, margin `0.01`, and seed 42. Final hard-stratum values:
+
+- real/null/shuffled physics error: `0.462472 / 0.474009 / 0.483200`;
+- real-vs-shuffled geometry sensitivity: `0.006236`;
+- occupancy IoU/F1: `0.661449 / 0.795012`;
+- scalar normalized MAE: `0.239241`, out-of-range fraction `0`;
+- `c_physics`/`a_goal` cross-sample standard deviations: `0.093942` / `0.115311`.
+
+This exploratory result passes Gate D (`physics_real < physics_shuffled`) and
+shows target-dependent decoded geometry. It is not yet a production selection:
+the lambda sweep and recoverable checkpoint artifact remain outstanding.
+
 These must finish and produce recoverable artifacts before selecting a
 production weight or declaring the spectrum-conditioned gate passed.
 
