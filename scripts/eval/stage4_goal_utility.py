@@ -30,6 +30,7 @@ import json
 import os
 import sys
 import time
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -47,7 +48,7 @@ from data.dataset import MetaDiTDataset, collate_batch
 from data.factorize import factorize_geometry
 from data.mask import BlockMasker
 from encoders.occupancy_encoder import OccupancyEncoder
-from losses.unified_losses import UnifiedJEPALoss
+from losses.unified_losses import UnifiedJEPALoss, occupancy_reconstruction_metrics
 from physics.physics_loop import load_surrogate
 from runtime.reproducibility import set_seed
 from runtime.device import resolve_device
@@ -97,7 +98,7 @@ def masked_cosine_loss(z_hat, z_y, mask):
 
 
 @torch.no_grad()
-def eval_goal_utility(model, batches, device, generator, step):
+def eval_goal_utility(model, surrogate, batches, device, generator, step):
     """Real/null/shuffled goal utility on the unified model (Gate D).
 
     Each batch is (occ, sv, spec, mask). Shuffling permutes the spectrum across
@@ -106,7 +107,12 @@ def eval_goal_utility(model, batches, device, generator, step):
     model.eval()
     agg = {k: [] for k in
            ["L_real", "L_null", "L_shuffled", "gap_null", "gap_shuffled",
-            "sensitivity_null", "sensitivity_shuffled"]}
+            "sensitivity_null", "sensitivity_shuffled",
+            "physics_real", "physics_null", "physics_shuffled",
+            "geometry_sensitivity_null", "geometry_sensitivity_shuffled",
+            "occupancy_iou", "occupancy_f1", "pred_occupancy_fraction",
+            "true_occupancy_fraction", "scalar_out_of_range_fraction",
+            "c_physics_cross_sample_std", "a_goal_cross_sample_std"]}
     for occ, sv, spec, M in batches:
         occ = occ.to(device); sv = sv.to(device)
         spec = spec.to(device); M = M.to(device)
@@ -129,6 +135,17 @@ def eval_goal_utility(model, batches, device, generator, step):
         L_real = masked_cosine_loss(z_r, z_y, mask)
         L_null = masked_cosine_loss(z_n, z_y, mask)
         L_shuf = masked_cosine_loss(z_s, z_y, mask)
+        def decode_and_error(out, target_spec):
+            geometry, _ = model.decode_geometry(
+                out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
+                scalar_known=sk, scalar_values=sv, hard_forward=True)
+            prediction = surrogate(geometry).prediction
+            scale = target_spec.std(dim=-1, keepdim=True).clamp_min(1e-4)
+            error = ((prediction - target_spec).abs() / scale).mean().item()
+            return geometry, error
+        g_r, p_r = decode_and_error(out_r, spec)
+        g_n, p_n = decode_and_error(out_n, spec)
+        g_s, p_s = decode_and_error(out_s, spec)
         agg["L_real"].append(L_real)
         agg["L_null"].append(L_null)
         agg["L_shuffled"].append(L_shuf)
@@ -138,6 +155,20 @@ def eval_goal_utility(model, batches, device, generator, step):
             (z_r - z_n).norm(dim=-1)[mask].mean().item())
         agg["sensitivity_shuffled"].append(
             (z_r - z_s).norm(dim=-1)[mask].mean().item())
+        agg["physics_real"].append(p_r)
+        agg["physics_null"].append(p_n)
+        agg["physics_shuffled"].append(p_s)
+        agg["geometry_sensitivity_null"].append((g_r - g_n).abs().mean().item())
+        agg["geometry_sensitivity_shuffled"].append((g_r - g_s).abs().mean().item())
+        om = occupancy_reconstruction_metrics(out_r["occupancy_logits"], occ)
+        for key in ("occupancy_iou", "occupancy_f1", "pred_occupancy_fraction", "true_occupancy_fraction"):
+            agg[key].append(float(om[key]))
+        bounds = model.scalar_decoder.bounds
+        agg["scalar_out_of_range_fraction"].append(float(
+            ((out_r["scalar_pred"] < bounds[:, 0]) |
+             (out_r["scalar_pred"] > bounds[:, 1])).float().mean()))
+        agg["c_physics_cross_sample_std"].append(float(out_r["c_physics"].std(dim=0).mean()))
+        agg["a_goal_cross_sample_std"].append(float(out_r["a_goal"].std(dim=0).mean()))
     out = {k: float(np.mean(v)) for k, v in agg.items()}
     out["step"] = step
     model.train()
@@ -268,7 +299,7 @@ def main():
                   f"L_phys={result['components'].get('L_phys', 0):.3f}")
 
         if (step + 1) % args.eval_every == 0:
-            m = eval_goal_utility(model, fixed_batches, device, rng, step + 1)
+            m = eval_goal_utility(model, surrogate, fixed_batches, device, rng, step + 1)
             eval_history.append(m)
             print(f"  [goal-utility @ step {step+1}] "
                   f"L_real={m['L_real']:.4f} "
@@ -278,7 +309,7 @@ def main():
             with open(out_dir / "goal_utility_metrics.json", "w") as f:
                 json.dump(eval_history, f, indent=2)
 
-    final = eval_goal_utility(model, fixed_batches, device, rng, args.total_steps)
+    final = eval_goal_utility(model, surrogate, fixed_batches, device, rng, args.total_steps)
     eval_history.append(final)
 
     ckpt_path = out_dir / "latest.pt"
@@ -286,8 +317,27 @@ def main():
                     str(ckpt_path), extra={"eval_history": eval_history})
     with open(out_dir / "goal_utility_metrics.json", "w") as f:
         json.dump(eval_history, f, indent=2)
+    config_sha = hashlib.sha256(Path(args.config).read_bytes()).hexdigest()
+    commit = "unknown"
+    try:
+        commit = os.popen(f"git -C {REPO_ROOT} rev-parse HEAD").read().strip()
+    except Exception:
+        pass
+    with open(out_dir / "run_metadata.json", "w") as f:
+        json.dump({
+            "architecture_id": "unified_occ_param_spectrum_jepa_v1",
+            "git_commit": commit,
+            "config_sha256": config_sha,
+            "dataset_root": str(data_root),
+            "seed": args.seed,
+            "total_steps": args.total_steps,
+            "validation_stratum": "100_percent_occupancy_mask_all_scalars_unknown",
+            "validation_batch_count": len(fixed_batches),
+            "checkpoint": str(out_dir / "latest.pt"),
+        }, f, indent=2)
 
-    gate_d = final["gap_shuffled"] > 0
+    gate_d = (final["physics_real"] < final["physics_shuffled"] and
+              final["geometry_sensitivity_shuffled"] > 0)
     print("\n=== Stage 4 Gate D verdict ===")
     print(f"  L_real             = {final['L_real']:.4f}")
     print(f"  L_shuffled         = {final['L_shuffled']:.4f}")
