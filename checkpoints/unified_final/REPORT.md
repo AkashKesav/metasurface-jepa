@@ -145,6 +145,10 @@ cosine `-0.05356 / 0.99756`, and goal-path gradient mean/max
 `188,426,071` bytes and SHA-256
 `d650b73d0956039e2a1eb2e7d6e35598f91e0578732b4f8b93499e799fa4251a`.
 
+The matched-weight run combining the selected `lambda_phys=0.2` with the
+goal-margin objective is prepared in `kaggle_goal/`, but submission is pending
+local Kaggle API re-authentication after the credential expired.
+
 ## Provenance
 
 - repaired comparison commit: `9a108c9`;
