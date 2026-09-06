@@ -55,6 +55,7 @@ from runtime.device import resolve_device
 from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
 from train.train_unified import (
     _build_scalar_masker_bank,
+    RegimeLogger,
     training_step,
     build_scheduler,
     _assert_no_ema_gradients,
@@ -252,6 +253,7 @@ def main():
         placement=cfg["curriculum"].get("mask_placement", "random"),
         seed=args.seed)
     scalar_bank = _build_scalar_masker_bank(cfg, seed=args.seed)
+    regime_logger = RegimeLogger(cfg)
 
     # Fixed hard-stratum val batches: 100% mask, all scalars unknown.
     # Each batch carries (occ, sv, spec, mask) so eval can permute spectrum.
@@ -292,7 +294,8 @@ def main():
         occ, sv, spec = get_batch()
         result, M, sk = training_step(
             model, objective, occ, sv, spec, cfg, device, step,
-            masker, rng, surrogate=surrogate, scalar_masker_bank=scalar_bank)
+            masker, rng, regime_logger, surrogate=surrogate,
+            scalar_masker_bank=scalar_bank)
         loss = result["total_loss"]
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
