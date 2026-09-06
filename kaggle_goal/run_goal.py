@@ -25,7 +25,7 @@ subprocess.run([
     "--config", str(repo / "configs/unified.yaml"),
     "--data-root", str(data_root), "--total-steps", "1500",
     "--eval-every", "250", "--device", "cuda",
-    "--lambda-phys", "0.8", "--lambda-goal", "2.0",
+    "--lambda-phys", "0.2", "--lambda-goal", "2.0",
     "--goal-margin", "0.01", "--seed", "42",
     "--output-dir", "/kaggle/working/results/goal_margin",
 ], cwd=repo, check=True)
