@@ -26,6 +26,7 @@ cmd = [
     "--config", str(REPO / "configs/unified.yaml"),
     "--data-root", str(data_root / "metadit" if (data_root / "metadit").exists() else data_root),
     "--lambda-phys", "1.0", "--total-steps", "1500", "--eval-every", "250",
+    "--device", "cuda",
     "--output-dir", "/kaggle/working/results/stage4",
 ]
 subprocess.run(cmd, cwd=REPO, check=True)

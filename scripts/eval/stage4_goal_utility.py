@@ -193,6 +193,7 @@ def main():
     ap.add_argument("--output-dir", default=str(REPO_ROOT / "results" / "stage4"))
     ap.add_argument("--resume", default=None)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -201,7 +202,7 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = resolve_device(cfg["train"].get("device", "cpu"))
+    device = resolve_device(args.device or cfg["train"].get("device", "cpu"))
     set_seed(args.seed)
     cfg["loss"]["lambda_phys"] = args.lambda_phys
 
