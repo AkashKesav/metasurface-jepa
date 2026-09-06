@@ -246,9 +246,10 @@ def main():
     vloader = DataLoader(vds, batch_size=cfg["train"]["batch_size"],
                          shuffle=False, num_workers=0, collate_fn=collate_batch)
 
-    masker = BlockMasker(grid_size=16, patch_size=4,
-                        placement=cfg["curriculum"].get("mask_placement", "random"),
-                        device=device)
+    masker = BlockMasker(
+        grid=16, min_side=3, k_range=(1, 4),
+        placement=cfg["curriculum"].get("mask_placement", "random"),
+        seed=args.seed)
     scalar_bank = _build_scalar_masker_bank(cfg, seed=args.seed)
 
     # Fixed hard-stratum val batches: 100% mask, all scalars unknown.
