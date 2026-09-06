@@ -42,6 +42,7 @@ loss:
   lambda_scalar: 1.0    # scalar L1 on unknown positions
   lambda_occ: 1.0       # masked occupancy BCE reconstruction
   lambda_phys: 0.0      # physics loss — disabled until Phase 4 MD §4 activation
+  lambda_raw: 0.0       # direct normalized raw-z alignment ablation
   gamma: 1.0            # VICReg variance hinge threshold
   eps: 1.0e-4           # VICReg numerical epsilon
 

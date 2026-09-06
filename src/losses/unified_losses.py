@@ -176,11 +176,11 @@ class UnifiedJEPALoss(nn.Module):
     """
 
     name = "unified_jepa"
-    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys")
+    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys", "L_raw")
 
     def __init__(self, hidden=192, lambda_inv=25.0, lambda_var=25.0,
                  lambda_cov=1.0, lambda_scalar=1.0, lambda_occ=1.0,
-                 lambda_phys=0.0,
+                 lambda_phys=0.0, lambda_raw=0.0,
                  gamma=1.0, eps=1e-4, scalar_loss_type="l1",
                  surrogate=None, physics_use_ste=True):
         super().__init__()
@@ -193,6 +193,7 @@ class UnifiedJEPALoss(nn.Module):
         self.lambda_scalar = lambda_scalar
         self.lambda_occ = lambda_occ
         self.lambda_phys = lambda_phys
+        self.lambda_raw = lambda_raw
         self.gamma = gamma
         self.eps = eps
         self.surrogate = surrogate  # frozen MetaDiT EM surrogate (Phase 4)
@@ -245,6 +246,13 @@ class UnifiedJEPALoss(nn.Module):
         L_var_w = self.lambda_var * L_var
         L_cov_w = self.lambda_cov * L_cov
 
+        # Optional direct raw-latent alignment ablation. Keep disabled by
+        # default; activate only after raw/projected diagnostics justify it.
+        L_raw = F.mse_loss(
+            F.normalize(z_hat[mask_bool], dim=-1),
+            F.normalize(z_y[mask_bool], dim=-1))
+        L_raw_w = self.lambda_raw * L_raw
+
         # Scalar L1 on unknown positions
         L_scalar = self.scalar_loss(
             out["scalar_pred"], scalar_values, scalar_known)
@@ -277,18 +285,21 @@ class UnifiedJEPALoss(nn.Module):
         total = (L_inv_w + L_var_w + L_cov_w
                  + self.lambda_scalar * L_scalar
                  + L_occ_w
-                 + self.lambda_phys * L_phys)
+                 + self.lambda_phys * L_phys
+                 + L_raw_w)
 
         out["loss_components"] = {
             "L_inv": float(L_inv.detach()), "L_var": float(L_var.detach()),
             "L_cov": float(L_cov.detach()),
             "L_scalar": float(L_scalar.detach()), "L_phys": float(L_phys.detach()),
             "L_occ": float(L_occ.detach()),
+            "L_raw": float(L_raw.detach()),
             "L_inv_weighted": float(L_inv_w.detach()),
             "L_var_weighted": float(L_var_w.detach()),
             "L_cov_weighted": float(L_cov_w.detach()),
             "L_occ_weighted": float(L_occ_w.detach()),
             "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
+            "L_raw_weighted": float(L_raw_w.detach()),
             "L_total": float(total.detach()),
         }
         out["occupancy_metrics"] = {

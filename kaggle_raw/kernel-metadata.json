@@ -1,0 +1,11 @@
+{
+  "id": "akashkesav/metasurface-jepa-raw-alignment-v1",
+  "title": "Metasurface JEPA raw alignment ablation v1",
+  "code_file": "run_raw.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["akashkesav/metadit-aaai2026-staging"]
+}

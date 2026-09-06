@@ -247,6 +247,8 @@ def main():
     ap.add_argument("--config", default=str(REPO_ROOT / "configs" / "unified.yaml"))
     ap.add_argument("--data-root", required=True)
     ap.add_argument("--lambda-phys", type=float, default=1.0)
+    ap.add_argument("--lambda-raw", type=float, default=0.0,
+                    help="exploratory normalized raw-z alignment weight")
     ap.add_argument("--lambda-goal", type=float, default=0.0,
                     help="exploratory real-vs-shuffled margin-loss weight")
     ap.add_argument("--goal-margin", type=float, default=0.01,
@@ -268,6 +270,7 @@ def main():
     device = resolve_device(args.device or cfg["train"].get("device", "cpu"))
     set_seed(args.seed)
     cfg["loss"]["lambda_phys"] = args.lambda_phys
+    cfg["loss"]["lambda_raw"] = args.lambda_raw
 
     data_root = Path(args.data_root)
     train_split = str(data_root / "split_data" / "train_set.mat")
@@ -286,6 +289,7 @@ def main():
         lambda_scalar=cfg["loss"]["lambda_scalar"],
         lambda_occ=cfg["loss"]["lambda_occ"],
         lambda_phys=cfg["loss"]["lambda_phys"],
+        lambda_raw=cfg["loss"].get("lambda_raw", 0.0),
         gamma=cfg["loss"].get("gamma", 1.0),
         eps=cfg["loss"].get("eps", 1e-4),
         surrogate=surrogate,
@@ -459,6 +463,7 @@ def main():
             "seed": args.seed,
             "lambda_goal": args.lambda_goal,
             "goal_margin": args.goal_margin,
+            "lambda_raw": args.lambda_raw,
             "invalid_val_samples_skipped": invalid_val_samples,
             "invalid_train_samples_skipped": invalid_train_samples,
             "total_steps": args.total_steps,
