@@ -87,11 +87,18 @@ def physics_loss_from_out(model, out, surrogate, occ, sv, sk, spec, mask,
     # assembly — the scalar analog of visible-occupancy retention.
     # Fix 4 (spec §6): hard_forward must actually reach decode_geometry —
     # the argument is behavior-affecting, not just present in the signature.
-    geometry, soft_occ = model.decode_geometry(
-        out["z_hat"], out["scalar_pred"],
+    decode_kwargs = dict(
         occ_input=occ, mask=mask, use_ste=use_ste,
         scalar_known=sk, scalar_values=sv,
         hard_forward=hard_forward)
+    # UnifiedJEPA.forward exposes the occupancy logits used by L_occ. Reuse
+    # them when present so the physics branch does not invoke the decoder a
+    # second time. The conditional keeps this helper compatible with small
+    # test stubs and older callers that provide only z_hat/scalar_pred.
+    if "occupancy_logits" in out:
+        decode_kwargs["occupancy_logits"] = out["occupancy_logits"]
+    geometry, soft_occ = model.decode_geometry(
+        out["z_hat"], out["scalar_pred"], **decode_kwargs)
 
     # Forward through frozen surrogate — autograd MUST flow (Phase 4 MD §4)
     result = surrogate(geometry)

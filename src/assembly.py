@@ -358,7 +358,7 @@ class UnifiedJEPA(nn.Module):
 
     def __init__(self, hidden=192, num_heads=6, geo_depth=6, predictor_depth=8,
                  goal_tokens=16, num_predictor_heads=6, scalar_hidden=128,
-                 n_film_blocks=6, spec_dim=256,
+                 n_film_blocks=6, spec_dim=256, scalar_bounds=None,
                  momentum_start=0.996, momentum_end=0.999):
         super().__init__()
         self.hidden = hidden
@@ -392,7 +392,7 @@ class UnifiedJEPA(nn.Module):
         )
 
         # Scalar decode heads
-        self.scalar_decoder = ScalarDecoder(hidden=hidden)
+        self.scalar_decoder = ScalarDecoder(hidden=hidden, bounds=scalar_bounds)
 
         # Occupancy decoder: latent → occupancy logits only, FiLM-conditioned
         # by effective (l,h,r) at every layer (architecture_v5.md §4.1).
@@ -539,6 +539,15 @@ class UnifiedJEPA(nn.Module):
             scalar_summary_pred=scalar_summary_pred,
         )
 
+        # Decode occupancy once here so the active objective can supervise it
+        # directly. The physics loop reuses these logits when available,
+        # avoiding a second occupancy-decoder forward for the same prediction.
+        effective_scalars = torch.where(
+            scalar_known, scalar_values, scalar_pred)
+        out["occupancy_logits"] = self.geometry_decoder(
+            occupancy_pred, effective_scalars)
+        out["effective_scalars"] = effective_scalars
+
         if with_target:
             with torch.no_grad():
                 # True scalars (all known) for target-side FiLM
@@ -559,7 +568,7 @@ class UnifiedJEPA(nn.Module):
 
     def decode_geometry(self, z_hat, scalar_pred, occ_input=None, mask=None,
                         scalar_known=None, scalar_values=None, use_ste=False,
-                        hard_forward=False):
+                        hard_forward=False, occupancy_logits=None):
         """Decode predicted latents to surrogate-ready geometry (Phase 4 MD §1-§3,
         architecture_v5.md §4.1).
 
@@ -595,8 +604,11 @@ class UnifiedJEPA(nn.Module):
         else:
             scalar_for_assembly = scalar_pred
 
-        # Decoder is FiLM-conditioned by the effective (l,h,r).
-        occ_logits = self.geometry_decoder(z_hat, scalar_for_assembly)
+        # Decoder is FiLM-conditioned by the effective (l,h,r). Reuse logits
+        # from UnifiedJEPA.forward when the caller has them.
+        if occupancy_logits is None:
+            occupancy_logits = self.geometry_decoder(z_hat, scalar_for_assembly)
+        occ_logits = occupancy_logits
         soft_occ = torch.sigmoid(occ_logits)  # (B, 1, 64, 64)
 
         if use_ste and self.training:
@@ -657,6 +669,14 @@ def build_unified_model(cfg, spec_weights, device="cpu",
         scalar_hidden=cfg.get("scalar_hidden", 128),
         n_film_blocks=cfg.get("n_film_blocks", 6),
         spec_dim=cfg.get("spec_dim", 256),
+        scalar_bounds=tuple(
+            tuple(cfg.get("scalar_bounds", {}).get(name, default))
+            for name, default in (
+                ("l_lattice", (2.5, 3.0)),
+                ("h_atom", (0.5, 1.0)),
+                ("r_atom", (3.5, 5.0)),
+            )
+        ),
     )
     kwargs.update(
         momentum_start=cfg.get("ema_momentum_start", 0.996),

@@ -6,6 +6,7 @@ Combines:
 - L_var  : VICReg variance penalty
 - L_cov  : VICReg covariance penalty
 - L_scalar: L1 regression on UNKNOWN scalar positions only
+- L_occ  : BCE occupancy reconstruction on UNKNOWN pixels only
 - L_phys : physics-response loss through frozen MetaDiT surrogate (Phase 4 MD §4)
 
 Full objective:
@@ -13,6 +14,7 @@ Full objective:
       + lambda_var  * L_var
       + lambda_cov  * L_cov
       + lambda_scalar * L_scalar
+      + lambda_occ * L_occ
       + lambda_phys * L_phys
 
 Per Phase 3 MD §5: staged training starts with lambda_phys=0 (physics loss
@@ -101,6 +103,55 @@ class PhysicsSpectrumLoss(nn.Module):
         self._enabled = False
 
 
+def _pixel_mask_from_token_mask(mask, target):
+    """Expand a 16x16 visible-token mask to the occupancy image resolution.
+
+    ``mask`` uses the model convention 1=visible and 0=masked.  The returned
+    tensor has the same spatial size as ``target`` and contains 1 for pixels
+    that are eligible for masked reconstruction (the complement of visible
+    pixels).  A ``None`` mask means every pixel is eligible.
+    """
+    if mask is None:
+        return torch.ones_like(target, dtype=target.dtype)
+    if mask.ndim == 3:
+        mask = mask.unsqueeze(1)
+    if mask.ndim != 4:
+        raise ValueError(f"token mask must be [B,H,W] or [B,1,H,W], got {tuple(mask.shape)}")
+    visible = F.interpolate(
+        mask.to(dtype=target.dtype), size=target.shape[-2:], mode="nearest")
+    return (1.0 - visible).clamp(0.0, 1.0)
+
+
+def occupancy_reconstruction_loss(occupancy_logits, occupancy_target, mask=None):
+    """BCE reconstruction averaged over masked/unknown occupancy pixels.
+
+    The denominator is clamped so the unmasked 0% reference condition remains
+    a valid, finite diagnostic instead of dividing by zero.
+    """
+    target = occupancy_target.to(dtype=occupancy_logits.dtype)
+    pixel_mask = _pixel_mask_from_token_mask(mask, target)
+    bce = F.binary_cross_entropy_with_logits(
+        occupancy_logits, target, reduction="none")
+    return (bce * pixel_mask).sum() / pixel_mask.sum().clamp(min=1.0)
+
+
+def occupancy_reconstruction_metrics(occupancy_logits, occupancy_target):
+    """Full-pixel occupancy diagnostics using a 0.5 probability threshold."""
+    pred = occupancy_logits >= 0.0
+    target = occupancy_target >= 0.5
+    tp = (pred & target).sum().to(dtype=occupancy_logits.dtype)
+    fp = (pred & ~target).sum().to(dtype=occupancy_logits.dtype)
+    fn = (~pred & target).sum().to(dtype=occupancy_logits.dtype)
+    iou = tp / (tp + fp + fn).clamp(min=1.0)
+    f1 = 2.0 * tp / (2.0 * tp + fp + fn).clamp(min=1.0)
+    return {
+        "occupancy_iou": iou,
+        "occupancy_f1": f1,
+        "pred_occupancy_fraction": pred.to(dtype=occupancy_logits.dtype).mean(),
+        "true_occupancy_fraction": target.to(dtype=occupancy_logits.dtype).mean(),
+    }
+
+
 class UnifiedJEPALoss(nn.Module):
     """Combined JEPA + VICReg + scalar + (optional) physics objective.
 
@@ -125,10 +176,11 @@ class UnifiedJEPALoss(nn.Module):
     """
 
     name = "unified_jepa"
-    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_phys")
+    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys")
 
     def __init__(self, hidden=192, lambda_inv=25.0, lambda_var=25.0,
-                 lambda_cov=1.0, lambda_scalar=1.0, lambda_phys=0.0,
+                 lambda_cov=1.0, lambda_scalar=1.0, lambda_occ=1.0,
+                 lambda_phys=0.0,
                  gamma=1.0, eps=1e-4, scalar_loss_type="l1",
                  surrogate=None, physics_use_ste=True):
         super().__init__()
@@ -139,6 +191,7 @@ class UnifiedJEPALoss(nn.Module):
         self.lambda_var = lambda_var
         self.lambda_cov = lambda_cov
         self.lambda_scalar = lambda_scalar
+        self.lambda_occ = lambda_occ
         self.lambda_phys = lambda_phys
         self.gamma = gamma
         self.eps = eps
@@ -158,7 +211,18 @@ class UnifiedJEPALoss(nn.Module):
         self.physics_loss = PhysicsSpectrumLoss()
 
     def forward(self, model, occupancy, scalar_values, scalar_known,
-                spectrum, mask, goal_mode="real"):
+                spectrum, mask, goal_mode="real", compute_physics=None,
+                physics_hard_forward=False):
+        """Evaluate the objective.
+
+        ``compute_physics`` controls whether the frozen surrogate is evaluated;
+        it is deliberately independent of ``model.training`` so validation can
+        compute the real physics term while the model is in eval mode.  The
+        default retains the inexpensive historical behavior: physics is
+        computed automatically during training only when it is weighted on.
+        """
+        if compute_physics is None:
+            compute_physics = bool(model.training and self.lambda_phys > 0)
         out = model(
             occupancy, scalar_values, scalar_known, spectrum,
             mask, goal_mode=goal_mode,
@@ -185,35 +249,54 @@ class UnifiedJEPALoss(nn.Module):
         L_scalar = self.scalar_loss(
             out["scalar_pred"], scalar_values, scalar_known)
 
+        # Occupancy BCE is the direct supervision for the decoded occupancy.
+        # It is restricted to hidden pixels so visible-pixel retention remains
+        # an inference contract rather than a shortcut in the loss.
+        L_occ = occupancy_reconstruction_loss(
+            out["occupancy_logits"], occupancy, mask=mask)
+        L_occ_w = self.lambda_occ * L_occ
+        occ_metrics = occupancy_reconstruction_metrics(
+            out["occupancy_logits"], occupancy)
+
         # Physics loss: decode geometry → surrogate → spectrum error (Phase 4 MD §4).
         # Reuses the ALREADY-COMPUTED out (z_hat/scalar_pred) via
         # physics_loop.physics_loss_from_out — exactly one student forward per
         # step, one physics decode, one surrogate forward (Fix 11). Delegates
         # to the single authoritative physics implementation.
-        if self.lambda_phys > 0 and self.surrogate is not None and model.training:
+        if compute_physics and self.lambda_phys > 0 and self.surrogate is not None:
             from physics.physics_loop import physics_loss_from_out
             L_phys, _, _ = physics_loss_from_out(
                 model, out, self.surrogate, occupancy, scalar_values,
                 scalar_known, spectrum, mask, loss_type="smooth_l1",
-                use_ste=self.physics_use_ste, normalize=True)
+                use_ste=self.physics_use_ste, normalize=True,
+                hard_forward=physics_hard_forward)
         else:
             L_phys = self.physics_loss(
                 out.get("spectrum_target", spectrum), spectrum)
 
         total = (L_inv_w + L_var_w + L_cov_w
                  + self.lambda_scalar * L_scalar
+                 + L_occ_w
                  + self.lambda_phys * L_phys)
 
         out["loss_components"] = {
             "L_inv": float(L_inv.detach()), "L_var": float(L_var.detach()),
             "L_cov": float(L_cov.detach()),
             "L_scalar": float(L_scalar.detach()), "L_phys": float(L_phys.detach()),
+            "L_occ": float(L_occ.detach()),
             "L_inv_weighted": float(L_inv_w.detach()),
             "L_var_weighted": float(L_var_w.detach()),
             "L_cov_weighted": float(L_cov_w.detach()),
+            "L_occ_weighted": float(L_occ_w.detach()),
             "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
             "L_total": float(total.detach()),
         }
+        out["occupancy_metrics"] = {
+            k: float(v.detach()) for k, v in occ_metrics.items()
+        }
+        out["physics_computed"] = bool(
+            compute_physics and self.lambda_phys > 0 and self.surrogate is not None
+        )
         return {
             "total_loss": total,
             "components": out["loss_components"],

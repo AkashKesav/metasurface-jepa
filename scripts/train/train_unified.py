@@ -45,7 +45,10 @@ from data.mask import BlockMasker
 from assembly import build_unified_model, load_into_model, set_spectrum_path
 from predictor.guidance import goal_dropout
 from physics.physics_loop import load_surrogate, physics_loss
-from losses.unified_losses import UnifiedJEPALoss
+from losses.unified_losses import (
+    UnifiedJEPALoss,
+    occupancy_reconstruction_metrics,
+)
 from runtime.reproducibility import set_seed, collect_rng_state, restore_rng_state
 from runtime.device import resolve_device
 from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
@@ -243,18 +246,34 @@ class RegimeLogger:
         self.scalar_regimes = cur["scalar_regimes"]
         self.mask_counts = {r: 0 for r in self.mask_ratios}
         self.regime_counts = {r: 0 for r in self.scalar_regimes}
+        self.mask_buckets = (0.0, 0.25, 0.5, 0.75, 1.0)
+        self.joint_counts = {
+            (r, s): 0 for r in self.mask_buckets
+            for s in ("all_known", "all_unknown", "independent", "correlated")
+        }
         self._total = 0
 
     def record(self, ratio, regime):
         self.mask_counts[ratio] += 1
         self.regime_counts[regime] += 1
+        bucket = min(self.mask_buckets, key=lambda x: abs(float(x) - float(ratio)))
+        canonical = "independent" if regime == "mixed" else regime
+        if (bucket, canonical) in self.joint_counts:
+            self.joint_counts[(bucket, canonical)] += 1
         self._total += 1
 
     def report(self):
         n = max(1, self._total)
+        joint_counts = {}
+        for (ratio, regime), count in self.joint_counts.items():
+            joint_counts[f"{ratio:g}|{regime}"] = {
+                "joint_count": count,
+                "joint_fraction": count / n,
+            }
         return {
             "mask_freq": {r: c / n for r, c in self.mask_counts.items()},
             "regime_freq": {r: c / n for r, c in self.regime_counts.items()},
+            "joint_counts": joint_counts,
         }
 
 
@@ -357,7 +376,13 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     # Phase 4 MD §3.5.1: goal dropout — replace A_goal with null token ~10%
     gd_p = cfg.get("train", {}).get("guidance_dropout", 0.0)
     goal_mode = goal_dropout("real", gd_p, rng)
-    result = objective(model, occ, sv, sk, spec, M, goal_mode=goal_mode)
+    # Make the physics decision explicit. This is intentionally independent of
+    # model.training so the same contract can be used by eval; a baseline with
+    # no surrogate still returns a zero physics term.
+    result = objective(
+        model, occ, sv, sk, spec, M, goal_mode=goal_mode,
+        compute_physics=True,
+    )
     loss = result["total_loss"]
 
     regime_logger.record(ratio, regime)
@@ -394,8 +419,12 @@ def validate(model, objective, val_batches, cfg, device):
         "proj_mse": [], "proj_cos_err": [], "proj_p_hat_norm": [],
         "proj_p_y_norm": [],
         "L_total": [], "L_inv": [], "L_var": [], "L_cov": [],
-        "L_scalar": [], "L_phys": [], "L_phys_weighted": [],
-        "scalar_err": [],
+        "L_scalar": [], "L_occ": [], "L_occ_weighted": [],
+        "L_phys": [], "L_phys_weighted": [],
+        "occupancy_iou": [], "occupancy_f1": [],
+        "pred_occupancy_fraction": [], "true_occupancy_fraction": [],
+        "scalar_err": [], "scalar_pred_min": [], "scalar_pred_max": [],
+        "scalar_out_of_range_fraction": [],
     }
     try:
         with torch.no_grad():
@@ -407,7 +436,12 @@ def validate(model, objective, val_batches, cfg, device):
                 M = val_masker.sample(occ, val_mask_ratio).to(device)
                 assert M.device == occ.device, (
                     "validation mask must be on the model device")
-                result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+                # The model/objective are in eval mode here, but the frozen
+                # surrogate must still be evaluated for a truthful L_phys.
+                result = objective(
+                    model, occ, sv, sk, spec, M, goal_mode="real",
+                    compute_physics=True,
+                )
                 out = result["out"]
                 mask_bool = out["mask"]
                 z_hat, z_y = out["z_hat"], out["z_y_raw"]
@@ -444,10 +478,22 @@ def validate(model, objective, val_batches, cfg, device):
                 # --- Loss components (composition is explicit) ---
                 c = result["components"]
                 for k in ("L_total", "L_inv", "L_var", "L_cov", "L_scalar",
-                          "L_phys", "L_phys_weighted"):
+                          "L_occ", "L_occ_weighted", "L_phys",
+                          "L_phys_weighted"):
                     metrics[k].append(float(c[k]))
+                occ_metrics = occupancy_reconstruction_metrics(
+                    out["occupancy_logits"], occ)
+                for k, value in occ_metrics.items():
+                    metrics[k].append(float(value))
                 se = (out["scalar_pred"] - sv).abs().mean()
                 metrics["scalar_err"].append(float(se))
+                bounds = model.scalar_decoder.bounds.to(device=sv.device)
+                scalar_pred = out["scalar_pred"]
+                outside = ((scalar_pred < bounds[:, 0]) |
+                           (scalar_pred > bounds[:, 1])).float()
+                metrics["scalar_pred_min"].append(float(scalar_pred.min()))
+                metrics["scalar_pred_max"].append(float(scalar_pred.max()))
+                metrics["scalar_out_of_range_fraction"].append(float(outside.mean()))
     finally:
         model.train()
         objective.train()
@@ -554,6 +600,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         lambda_var=loss_cfg.get("lambda_var", 25.0),
         lambda_cov=loss_cfg.get("lambda_cov", 1.0),
         lambda_scalar=loss_cfg.get("lambda_scalar", 1.0),
+        lambda_occ=loss_cfg.get("lambda_occ", 1.0),
         lambda_phys=lambda_phys,
         gamma=loss_cfg.get("gamma", 1.0),
         eps=loss_cfg.get("eps", 1e-4),
@@ -684,7 +731,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
               f"L_inv={components['L_inv']:.4f} "
               f"L_var={components['L_var']:.4f} "
               f"L_cov={components['L_cov']:.4f} "
-              f"L_scalar={components['L_scalar']:.4f}")
+              f"L_scalar={components['L_scalar']:.4f} "
+              f"L_occ={components['L_occ']:.4f}")
         assert torch.isfinite(loss), "smoke loss must be finite"
         return {"final_step": 0, "final_loss": float(loss.detach()),
                 "components": components, "regime_report": regime_logger.report()}
@@ -771,6 +819,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             print(f"step {step:5d}  loss={last_loss:.4f}  "
                   f"L_inv={c['L_inv']:.4f} L_var={c['L_var']:.4f} "
                   f"L_cov={c['L_cov']:.4f} L_scalar={c['L_scalar']:.4f} "
+                  f"L_occ={c['L_occ']:.4f} L_occ_w={c['L_occ_weighted']:.4f} "
                   f"L_phys={c['L_phys']:.4f} "
                   f"L_phys_w={c['L_phys_weighted']:.4f} "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
@@ -883,6 +932,7 @@ def preflight(cfg, device=None):
         lambda_var=cfg.get("loss", {}).get("lambda_var", 25.0),
         lambda_cov=cfg.get("loss", {}).get("lambda_cov", 1.0),
         lambda_scalar=cfg.get("loss", {}).get("lambda_scalar", 1.0),
+        lambda_occ=cfg.get("loss", {}).get("lambda_occ", 1.0),
         lambda_phys=max(cfg.get("loss", {}).get("lambda_phys", 0.0), 1.0),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),

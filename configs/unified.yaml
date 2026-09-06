@@ -13,6 +13,14 @@ scalar_convention:
     r_atom: {channel: 0, divisor: 5.0, dense: false}
   factorized_scalar_representation: raw physical values (not rescaled)
 
+# Physical output bounds for the scalar decoder. These are explicit model
+# constraints and are also reported by evaluation; the surrogate is not the
+# mechanism that keeps predictions in range.
+scalar_bounds:
+  l_lattice: [2.5, 3.0]
+  h_atom: [0.5, 1.0]
+  r_atom: [3.5, 5.0]
+
 variant: unified
 hidden: 192
 num_heads: 6
@@ -32,6 +40,7 @@ loss:
   lambda_var: 25.0      # VICReg variance penalty
   lambda_cov: 1.0       # VICReg covariance penalty
   lambda_scalar: 1.0    # scalar L1 on unknown positions
+  lambda_occ: 1.0       # masked occupancy BCE reconstruction
   lambda_phys: 0.0      # physics loss — disabled until Phase 4 MD §4 activation
   gamma: 1.0            # VICReg variance hinge threshold
   eps: 1.0e-4           # VICReg numerical epsilon
