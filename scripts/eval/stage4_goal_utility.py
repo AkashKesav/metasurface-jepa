@@ -52,7 +52,7 @@ from losses.unified_losses import UnifiedJEPALoss, occupancy_reconstruction_metr
 from physics.physics_loop import load_surrogate
 from runtime.reproducibility import set_seed
 from runtime.device import resolve_device
-from train.engine import save_checkpoint, load_checkpoint
+from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
 from train.train_unified import (
     _build_scalar_masker_bank,
     training_step,
@@ -318,13 +318,23 @@ def main():
                   f"(gap>0: real helps vs shuffled)")
             with open(out_dir / "goal_utility_metrics.json", "w") as f:
                 json.dump(eval_history, f, indent=2)
+            save_checkpoint(
+                str(out_dir / "latest.pt"), model, objective, optimizer, scheduler,
+                cfg, global_step=step, is_epoch_end=False,
+                metrics=m, ema_state=collect_ema_state(model),
+                masker_rng_state=masker.get_rng_state(), device=device,
+                artifact_type="latest", extra={"eval_history": eval_history})
 
     final = eval_goal_utility(model, surrogate, fixed_batches, device, rng, args.total_steps)
     eval_history.append(final)
 
     ckpt_path = out_dir / "latest.pt"
-    save_checkpoint(model, objective, optimizer, scheduler, args.total_steps,
-                    str(ckpt_path), extra={"eval_history": eval_history})
+    save_checkpoint(
+        str(ckpt_path), model, objective, optimizer, scheduler, cfg,
+        global_step=args.total_steps - 1, is_epoch_end=True,
+        metrics=final, ema_state=collect_ema_state(model),
+        masker_rng_state=masker.get_rng_state(), device=device,
+        artifact_type="final", extra={"eval_history": eval_history})
     with open(out_dir / "goal_utility_metrics.json", "w") as f:
         json.dump(eval_history, f, indent=2)
     config_sha = hashlib.sha256(Path(args.config).read_bytes()).hexdigest()
