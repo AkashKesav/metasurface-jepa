@@ -136,7 +136,8 @@ def persist_checkpoint_shards(path, shard_bytes=40 * 1024 * 1024):
 
 
 @torch.no_grad()
-def eval_goal_utility(model, surrogate, batches, device, generator, step):
+def eval_goal_utility(model, surrogate, batches, device, generator, step,
+                      objective=None):
     """Real/null/shuffled goal utility on the unified model (Gate D).
 
     Each batch is (occ, sv, spec, mask). Shuffling permutes the spectrum across
@@ -153,6 +154,10 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step):
             "scalar_mae", "scalar_normalized_mae", "scalar_pred_min",
             "scalar_pred_max",
             "c_physics_cross_sample_std", "a_goal_cross_sample_std"]}
+    for key in ("raw_z_mse", "raw_z_cosine", "raw_z_hat_norm",
+                "raw_z_y_norm", "projected_mse", "projected_cosine",
+                "projected_pred_norm", "projected_target_norm"):
+        agg[key] = []
     for occ, sv, spec, M in batches:
         occ = occ.to(device); sv = sv.to(device)
         spec = spec.to(device); M = M.to(device)
@@ -175,6 +180,22 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step):
         L_real = masked_cosine_loss(z_r, z_y, mask)
         L_null = masked_cosine_loss(z_n, z_y, mask)
         L_shuf = masked_cosine_loss(z_s, z_y, mask)
+        raw_diff = (z_r - z_y)[mask]
+        raw_pred = z_r[mask]
+        raw_target = z_y[mask]
+        agg["raw_z_mse"].append(float(raw_diff.square().mean()))
+        agg["raw_z_cosine"].append(float(torch.nn.functional.cosine_similarity(
+            raw_pred, raw_target, dim=-1).mean()))
+        agg["raw_z_hat_norm"].append(float(raw_pred.norm(dim=-1).mean()))
+        agg["raw_z_y_norm"].append(float(raw_target.norm(dim=-1).mean()))
+        if objective is not None:
+            proj_pred = objective.projector(z_r)[mask]
+            proj_target = objective.projector(z_y)[mask]
+            agg["projected_mse"].append(float((proj_pred - proj_target).square().mean()))
+            agg["projected_cosine"].append(float(torch.nn.functional.cosine_similarity(
+                proj_pred, proj_target, dim=-1).mean()))
+            agg["projected_pred_norm"].append(float(proj_pred.norm(dim=-1).mean()))
+            agg["projected_target_norm"].append(float(proj_target.norm(dim=-1).mean()))
         def decode_and_error(out, target_spec):
             geometry, _ = model.decode_geometry(
                 out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
@@ -384,7 +405,8 @@ def main():
                   f"L_goal={float(goal_term.detach()):.4f}")
 
         if (step + 1) % args.eval_every == 0:
-            m = eval_goal_utility(model, surrogate, fixed_batches, device, rng, step + 1)
+            m = eval_goal_utility(model, surrogate, fixed_batches, device, rng,
+                                  step + 1, objective=objective)
             eval_history.append(m)
             print(f"  [goal-utility @ step {step+1}] "
                   f"L_real={m['L_real']:.4f} "
@@ -400,7 +422,8 @@ def main():
                 masker_rng_state=masker.get_rng_state(), device=device,
                 artifact_type="latest", extra={"eval_history": eval_history})
 
-    final = eval_goal_utility(model, surrogate, fixed_batches, device, rng, args.total_steps)
+    final = eval_goal_utility(model, surrogate, fixed_batches, device, rng,
+                              args.total_steps, objective=objective)
     eval_history.append(final)
 
     ckpt_path = out_dir / "latest.pt"
