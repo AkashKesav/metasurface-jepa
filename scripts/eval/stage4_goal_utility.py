@@ -258,7 +258,14 @@ def main():
     # Fixed hard-stratum val batches: 100% mask, all scalars unknown.
     # Each batch carries (occ, sv, spec, mask) so eval can permute spectrum.
     fixed_batches = []
+    invalid_val_samples = 0
     for G, S in vloader:
+        valid = ((G[:, 0].amax(dim=(1, 2)) > 0) &
+                 (G[:, 1].amax(dim=(1, 2)) > 0))
+        invalid_val_samples += int((~valid).sum().item())
+        if not valid.any():
+            continue
+        G, S = G[valid], S[valid]
         G, S = G.to(device), S.to(device)
         occ, sv = factorize_geometry(G)
         M = torch.zeros(G.shape[0], 16, 16, device=device)  # all masked
@@ -279,15 +286,24 @@ def main():
     data_iter = iter(loader)
     t0 = time.time()
 
+    invalid_train_samples = 0
+
     def get_batch():
         nonlocal data_iter
-        try:
-            G, S = next(data_iter)
-        except StopIteration:
-            data_iter = iter(loader)
-            G, S = next(data_iter)
-        occ, sv = factorize_geometry(G)
-        return occ.to(device), sv.to(device), S.to(device)
+        nonlocal invalid_train_samples
+        while True:
+            try:
+                G, S = next(data_iter)
+            except StopIteration:
+                data_iter = iter(loader)
+                G, S = next(data_iter)
+            valid = ((G[:, 0].amax(dim=(1, 2)) > 0) &
+                     (G[:, 1].amax(dim=(1, 2)) > 0))
+            invalid_train_samples += int((~valid).sum().item())
+            if valid.any():
+                G, S = G[valid], S[valid]
+                occ, sv = factorize_geometry(G)
+                return occ.to(device), sv.to(device), S.to(device)
 
     for step in range(start_step, args.total_steps):
         optimizer.zero_grad(set_to_none=True)
@@ -353,6 +369,8 @@ def main():
             "config_sha256": config_sha,
             "dataset_root": str(data_root),
             "seed": args.seed,
+            "invalid_val_samples_skipped": invalid_val_samples,
+            "invalid_train_samples_skipped": invalid_train_samples,
             "total_steps": args.total_steps,
             "validation_stratum": "100_percent_occupancy_mask_all_scalars_unknown",
             "validation_batch_count": len(fixed_batches),
