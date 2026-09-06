@@ -134,6 +134,17 @@ Gate D passes on this exploratory goal-margin run. Its checkpoint reassembled
 to `188,426,071` bytes with SHA-256
 `d6e8289725e6b3460ffd0d47892ca24cea9009409b157a0b3cda3a8075c4fd6d`.
 
+The final metadata-compliance kernel
+`akashkesav/metasurface-jepa-goal-margin-experiment-v4` completed from commit
+`4e5ee0b`. It records validation IDs `[0, 1, ..., 15]`, the same hard-stratum
+Gate-D pass, and the following final values: real/null/shuffled physics
+`0.473821 / 0.480945 / 0.479728`, geometry sensitivity `0.005129`, occupancy
+IoU/F1 `0.674159 / 0.804085`, scalar normalized MAE `0.241196`, raw/projected
+cosine `-0.05356 / 0.99756`, and goal-path gradient mean/max
+`0.1540 / 77.4082`. Its emitted checkpoint manifest specifies
+`188,426,071` bytes and SHA-256
+`d650b73d0956039e2a1eb2e7d6e35598f91e0578732b4f8b93499e799fa4251a`.
+
 ## Provenance
 
 - repaired comparison commit: `9a108c9`;
