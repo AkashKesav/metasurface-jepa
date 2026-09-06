@@ -349,6 +349,7 @@ def main():
     t0 = time.time()
 
     invalid_train_samples = 0
+    goal_grad_history = []
 
     def get_batch():
         nonlocal data_iter
@@ -390,6 +391,12 @@ def main():
             goal_term = torch.relu(args.goal_margin + p_real - p_shuf)
             loss = loss + args.lambda_goal * goal_term
         loss.backward()
+        goal_grad_sq = 0.0
+        for name, parameter in model.named_parameters():
+            if name.startswith("spectrum_path.") and parameter.grad is not None:
+                goal_grad_sq += float(parameter.grad.detach().square().sum())
+        goal_grad_norm = goal_grad_sq ** 0.5
+        goal_grad_history.append(goal_grad_norm)
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad] +
             [p for p in objective.parameters() if p.requires_grad],
@@ -402,7 +409,8 @@ def main():
             print(f"[step {step+1}/{args.total_steps}] "
                   f"L_total={result['components']['L_total']:.3f} "
                   f"L_phys={result['components'].get('L_phys', 0):.3f} "
-                  f"L_goal={float(goal_term.detach()):.4f}")
+                  f"L_goal={float(goal_term.detach()):.4f} "
+                  f"goal_grad={goal_grad_norm:.3e}")
 
         if (step + 1) % args.eval_every == 0:
             m = eval_goal_utility(model, surrogate, fixed_batches, device, rng,
@@ -457,6 +465,8 @@ def main():
             "validation_stratum": "100_percent_occupancy_mask_all_scalars_unknown",
             "validation_batch_count": len(fixed_batches),
             "regime_report": regime_logger.report(),
+            "goal_path_grad_norm_mean": float(np.mean(goal_grad_history)),
+            "goal_path_grad_norm_max": float(np.max(goal_grad_history)),
             "checkpoint": str(out_dir / "latest.pt"),
             "checkpoint_manifest": checkpoint_manifest,
         }, f, indent=2)
