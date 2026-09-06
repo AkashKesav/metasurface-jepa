@@ -98,6 +98,43 @@ def masked_cosine_loss(z_hat, z_y, mask):
     return d[mask].mean().item()
 
 
+def persist_checkpoint_shards(path, shard_bytes=40 * 1024 * 1024):
+    """Make a large checkpoint recoverable through Kaggle output artifacts.
+
+    Kaggle may list an oversized single output file without its payload. The
+    manifest and bounded shards are independently downloadable and can be
+    concatenated in lexical order to reconstruct ``path`` exactly.
+    """
+    path = Path(path)
+    digest = hashlib.sha256()
+    size = 0
+    parts = []
+    with path.open("rb") as src:
+        index = 0
+        while True:
+            chunk = src.read(shard_bytes)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+            part = path.with_name(f"{path.name}.part{index:04d}")
+            with part.open("wb") as dst:
+                dst.write(chunk)
+            parts.append(part.name)
+            index += 1
+    manifest = {
+        "source": path.name,
+        "bytes": size,
+        "sha256": digest.hexdigest(),
+        "part_bytes": shard_bytes,
+        "parts": parts,
+        "reassemble": "concatenate parts in listed order and verify sha256",
+    }
+    path.with_name(f"{path.name}.manifest.json").write_text(
+        json.dumps(manifest, indent=2))
+    return manifest
+
+
 @torch.no_grad()
 def eval_goal_utility(model, surrogate, batches, device, generator, step):
     """Real/null/shuffled goal utility on the unified model (Gate D).
@@ -373,6 +410,7 @@ def main():
         metrics=final, ema_state=collect_ema_state(model),
         masker_rng_state=masker.get_rng_state(), device=device,
         artifact_type="final", extra={"eval_history": eval_history})
+    checkpoint_manifest = persist_checkpoint_shards(ckpt_path)
     with open(out_dir / "goal_utility_metrics.json", "w") as f:
         json.dump(eval_history, f, indent=2)
     config_sha = hashlib.sha256(Path(args.config).read_bytes()).hexdigest()
@@ -396,6 +434,7 @@ def main():
             "validation_stratum": "100_percent_occupancy_mask_all_scalars_unknown",
             "validation_batch_count": len(fixed_batches),
             "checkpoint": str(out_dir / "latest.pt"),
+            "checkpoint_manifest": checkpoint_manifest,
         }, f, indent=2)
 
     gate_d = (final["physics_real"] < final["physics_shuffled"] and
