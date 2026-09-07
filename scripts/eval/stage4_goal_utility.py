@@ -407,8 +407,12 @@ def main():
             # Derangement for the training batch: the requested target is
             # changed while geometry, mask, and scalar-known state stay fixed.
             goal_spec = torch.roll(spec, shifts=1, dims=0)
-            out_shuf = model(occ, sv, sk, goal_spec, M, goal_mode="real")
-            out_null = model(occ, sv, sk, spec, M, goal_mode="null")
+            # Comparison branches are references, not optimization targets.
+            # Detach them so ranking cannot pass by deliberately damaging the
+            # null/shuffled predictions instead of improving the real branch.
+            with torch.no_grad():
+                out_shuf = model(occ, sv, sk, goal_spec, M, goal_mode="real")
+                out_null = model(occ, sv, sk, spec, M, goal_mode="null")
             p_real, _, _ = physics_loss_from_out(
                 model, result["out"], surrogate, occ, sv, sk, spec, M,
                 loss_type="smooth_l1", use_ste=True, normalize=True)
