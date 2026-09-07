@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 repo = Path("/kaggle/working/metasurface-jepa")
@@ -10,6 +11,15 @@ subprocess.run([
 subprocess.run(["python", "-m", "pip", "install", "-q", "-r",
                 str(repo / "requirements.txt")], check=True)
 
+staging = Path("/kaggle/working/metadit_staging")
+staging.mkdir(parents=True, exist_ok=True)
+for input_root in Path("/kaggle/input").glob("*"):
+    for archive_name in ("split_data.tar", "weights.tar"):
+        archive = input_root / archive_name
+        if archive.exists():
+            with tarfile.open(archive) as tf:
+                tf.extractall(staging)
+
 data_root = None
 for root, _, _ in os.walk("/kaggle/input"):
     p = Path(root)
@@ -17,6 +27,9 @@ for root, _, _ in os.walk("/kaggle/input"):
        (p / "weights" / "surrogate_model.bin").exists():
         data_root = p
         break
+if data_root is None and (staging / "split_data" / "train_set.mat").exists() and \
+   (staging / "weights" / "surrogate_model.bin").exists():
+    data_root = staging
 if data_root is None:
     raise RuntimeError("MetaDiT staging dataset not found under /kaggle/input")
 
