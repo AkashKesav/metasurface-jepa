@@ -209,6 +209,36 @@ The JSON manifest was retrieved; Kaggle exposed the shard payloads as zero-byte
 placeholders during this download, so local shard reassembly was not claimed.
 The next change must address goal direction/selection, not merely increase
 goal-path sensitivity.
+
+## Direct goal route v2: real-vs-null ranking
+
+The corrected objective was run as
+`anosvol/metasurface-jepa-direct-goal-route-v2`, from commit `5782ff4`, using
+the same dataset, seed 42, 1500 steps, direct goal route enabled,
+`lambda_phys=0.2`, `lambda_goal=2.0`, margin `0.01`, null-ranking weight
+`1.0`, and classifier-free goal dropout disabled for the ranking experiment.
+
+Final hard-stratum values:
+
+- physics real/null/shuffled: `0.500646 / 0.881986 / 0.538502`;
+- real-vs-null: **PASS**; real-vs-shuffled: **PASS**;
+- geometry sensitivity null/shuffled: `0.213824 / 0.020189`;
+- occupancy IoU/F1: `0.681511 / 0.809361`;
+- predicted/true occupancy fraction: `0.462021 / 0.422974`;
+- scalar normalized MAE: `0.232755`, out-of-range fraction `0`;
+- raw latent cosine: `0.01725`;
+- projected latent cosine: `0.997095`;
+- `c_physics`/`a_goal` cross-sample standard deviations:
+  `0.098821 / 0.098431`;
+- goal residual norm: `1.97334`, learned goal scale `0.110396`;
+- goal-path gradient norm mean/max: `0.8812 / 1058.65`.
+
+This run passes the two required goal-direction gates and is the first run in
+this audit to show the requested target outperforming both null and shuffled
+goals. The checkpoint manifest specifies `191,558,371` bytes and SHA-256
+`6d7362b11c846f614cc3361e29914290c7eece4c1e5a8aa21bb0fc5646c117af`.
+The raw/projected mismatch remains (`0.01725` vs `0.997095` cosine), so raw
+latent alignment remains a scientific diagnostic rather than a production gate.
 - seed: `42`;
 - hard-stratum validation batches: `8`;
 - one invalid training sample was skipped and recorded by the evaluator.
