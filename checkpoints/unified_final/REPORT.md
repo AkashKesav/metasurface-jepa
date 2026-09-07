@@ -146,15 +146,37 @@ cosine `-0.05356 / 0.99756`, and goal-path gradient mean/max
 `d650b73d0956039e2a1eb2e7d6e35598f91e0578732b4f8b93499e799fa4251a`.
 
 The matched-weight run combining the selected `lambda_phys=0.2` with the
-goal-margin objective is prepared in `kaggle_goal/`, but submission is pending
-local Kaggle API re-authentication after the credential expired.
+goal-margin objective completed on WSL Kaggle as
+`anosvol/metasurface-jepa-goal-margin-selected-v2`, from commit `b784c65`.
+It used dataset `anosvol/metadit-aaai2026-staging`, seed `42`, 1500 steps,
+`lambda_goal=2.0`, and margin `0.01`. On the fixed hard stratum
+(`100_percent_occupancy_mask_all_scalars_unknown`, validation IDs 0--15), the
+final step-1500 values were:
+
+- physics real/null/shuffled: `0.492732 / 0.485704 / 0.518057`;
+- real-vs-shuffled geometry sensitivity: `0.0111547`;
+- occupancy IoU/F1: `0.690314 / 0.815067`;
+- predicted/true occupancy fraction: `0.499176 / 0.422974`;
+- scalar normalized MAE: `0.237963`, scalar out-of-range fraction `0`;
+- raw latent MSE/cosine: `6.18184 / -0.06618`;
+- projected latent MSE/cosine: `0.004019 / 0.997437`;
+- `c_physics`/`a_goal` cross-sample standard deviations:
+  `0.091998 / 0.085290`;
+- goal-path gradient norm mean/max: `4.7147 / 6838.37`.
+
+This satisfies the measured real-vs-shuffled direction and decoded-geometry
+sensitivity gate for this run. The checkpoint was downloaded as five shards,
+reassembled to `188,426,071` bytes, and matched the emitted SHA-256:
+`2faa5ed7c3268a0faef9784a4ea650a4e340b308c0e3deefb7dea818910aec53`.
 
 ## Provenance
 
 - repaired comparison commit: `9a108c9`;
 - goal-margin code commit: `acf6998`;
 - sweep launcher commit: `c32a7cf`;
-- Kaggle dataset: `akashkesav/metadit-aaai2026-staging`;
+- Kaggle dataset: `anosvol/metadit-aaai2026-staging`;
+- final Kaggle kernel: `anosvol/metasurface-jepa-goal-margin-selected-v2`;
+- final checkpoint SHA-256: `2faa5ed7c3268a0faef9784a4ea650a4e340b308c0e3deefb7dea818910aec53`;
 - seed: `42`;
 - hard-stratum validation batches: `8`;
 - one invalid training sample was skipped and recorded by the evaluator.
