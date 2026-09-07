@@ -261,6 +261,8 @@ def main():
                     help="enable direct masked-query spectrum residual route")
     ap.add_argument("--goal-margin", type=float, default=0.01,
                     help="exploratory normalized-physics margin")
+    ap.add_argument("--goal-null-weight", type=float, default=1.0,
+                    help="relative weight for real-vs-null goal ranking")
     ap.add_argument("--total-steps", type=int, default=1500)
     ap.add_argument("--eval-every", type=int, default=250)
     ap.add_argument("--output-dir", default=str(REPO_ROOT / "results" / "stage4"))
@@ -280,6 +282,10 @@ def main():
     cfg["loss"]["lambda_phys"] = args.lambda_phys
     cfg["loss"]["lambda_raw"] = args.lambda_raw
     cfg["direct_goal_route"] = bool(args.direct_goal_route)
+    if args.lambda_goal > 0:
+        # The pairwise goal objective must use a real-goal anchor. Do not let
+        # classifier-free dropout silently turn the anchor into a null goal.
+        cfg.setdefault("train", {})["guidance_dropout"] = 0.0
 
     data_root = Path(args.data_root)
     train_split = str(data_root / "split_data" / "train_set.mat")
@@ -395,18 +401,26 @@ def main():
             scalar_masker_bank=scalar_bank)
         loss = result["total_loss"]
         goal_term = loss.new_zeros(())
+        goal_term_shuffled = loss.new_zeros(())
+        goal_term_null = loss.new_zeros(())
         if args.lambda_goal > 0 and spec.shape[0] > 1:
             # Derangement for the training batch: the requested target is
             # changed while geometry, mask, and scalar-known state stay fixed.
             goal_spec = torch.roll(spec, shifts=1, dims=0)
             out_shuf = model(occ, sv, sk, goal_spec, M, goal_mode="real")
+            out_null = model(occ, sv, sk, spec, M, goal_mode="null")
             p_real, _, _ = physics_loss_from_out(
                 model, result["out"], surrogate, occ, sv, sk, spec, M,
                 loss_type="smooth_l1", use_ste=True, normalize=True)
             p_shuf, _, _ = physics_loss_from_out(
                 model, out_shuf, surrogate, occ, sv, sk, spec, M,
                 loss_type="smooth_l1", use_ste=True, normalize=True)
-            goal_term = torch.relu(args.goal_margin + p_real - p_shuf)
+            p_null, _, _ = physics_loss_from_out(
+                model, out_null, surrogate, occ, sv, sk, spec, M,
+                loss_type="smooth_l1", use_ste=True, normalize=True)
+            goal_term_shuffled = torch.relu(args.goal_margin + p_real - p_shuf)
+            goal_term_null = torch.relu(args.goal_margin + p_real - p_null)
+            goal_term = goal_term_shuffled + args.goal_null_weight * goal_term_null
             loss = loss + args.lambda_goal * goal_term
         loss.backward()
         goal_grad_sq = 0.0
@@ -428,6 +442,8 @@ def main():
                   f"L_total={result['components']['L_total']:.3f} "
                   f"L_phys={result['components'].get('L_phys', 0):.3f} "
                   f"L_goal={float(goal_term.detach()):.4f} "
+                  f"(shuf={float(goal_term_shuffled.detach()):.4f}, "
+                  f"null={float(goal_term_null.detach()):.4f}) "
                   f"goal_grad={goal_grad_norm:.3e}")
 
         if (step + 1) % args.eval_every == 0:
@@ -477,6 +493,8 @@ def main():
             "seed": args.seed,
             "lambda_goal": args.lambda_goal,
             "goal_margin": args.goal_margin,
+            "goal_null_weight": args.goal_null_weight,
+            "guidance_dropout": cfg["train"].get("guidance_dropout", 0.0),
             "lambda_raw": args.lambda_raw,
             "direct_goal_route": bool(args.direct_goal_route),
             "goal_residual": bool(args.direct_goal_route),

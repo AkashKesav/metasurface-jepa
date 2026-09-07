@@ -1,6 +1,6 @@
 {
-  "id": "anosvol/metasurface-jepa-direct-goal-v1",
-  "title": "Metasurface JEPA direct goal route v1",
+  "id": "anosvol/metasurface-jepa-direct-goal-v2",
+  "title": "Metasurface JEPA direct goal route v2",
   "code_file": "run_direct_goal.py",
   "language": "python",
   "kernel_type": "script",

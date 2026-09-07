@@ -147,3 +147,19 @@ encoder representation is the bottleneck.
 - Current matched run: no cloud job is running now.
 - Next active work: implement and test the controlled direct goal-route ablation.
 
+## Improvement after the first ablation
+
+The first direct route increased target sensitivity but still produced
+`physics(real) > physics(null)`. The next run keeps the route and adds two
+pairwise ranking terms:
+
+```text
+L_goal_shuffled = relu(margin + E_real - E_shuffled)
+L_goal_null     = relu(margin + E_real - E_null)
+L_goal          = L_goal_shuffled + beta * L_goal_null
+```
+
+The first controlled setting uses configurable `beta=1.0`. The real branch is
+forced to remain a real-goal anchor by disabling classifier-free goal dropout
+for this experiment, avoiding accidental comparison of a null-dropped anchor
+against shuffled and null alternatives.

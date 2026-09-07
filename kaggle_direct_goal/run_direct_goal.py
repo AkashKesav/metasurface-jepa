@@ -39,6 +39,7 @@ subprocess.run([
     "--data-root", str(data_root), "--total-steps", "1500",
     "--eval-every", "250", "--device", "cuda",
     "--lambda-phys", "0.2", "--lambda-goal", "2.0",
-    "--goal-margin", "0.01", "--direct-goal-route", "--seed", "42",
+    "--goal-margin", "0.01", "--goal-null-weight", "1.0",
+    "--direct-goal-route", "--seed", "42",
     "--output-dir", "/kaggle/working/results/direct_goal",
 ], cwd=repo, check=True)
