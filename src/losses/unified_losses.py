@@ -230,10 +230,14 @@ class UnifiedJEPALoss(nn.Module):
         )
         mask_bool = out["mask"]
         z_hat = out["z_hat"]
+        # The direct goal route is intentionally outside the geometry-only
+        # JEPA/VICReg representation target. Physics decodes z_hat, while
+        # representation losses supervise the base latent when available.
+        z_hat_repr = out.get("z_hat_base", z_hat)
         z_y = out["z_y_raw"]
 
         # Projected space (shared projector, single forward per branch)
-        p_hat_full = self.projector(z_hat)
+        p_hat_full = self.projector(z_hat_repr)
         p_y_full = self.projector(z_y)
         p_hat = p_hat_full[mask_bool]
         p_y = p_y_full[mask_bool]
@@ -249,7 +253,7 @@ class UnifiedJEPALoss(nn.Module):
         # Optional direct raw-latent alignment ablation. Keep disabled by
         # default; activate only after raw/projected diagnostics justify it.
         L_raw = F.mse_loss(
-            F.normalize(z_hat[mask_bool], dim=-1),
+            F.normalize(z_hat_repr[mask_bool], dim=-1),
             F.normalize(z_y[mask_bool], dim=-1))
         L_raw_w = self.lambda_raw * L_raw
 
@@ -312,7 +316,7 @@ class UnifiedJEPALoss(nn.Module):
             "total_loss": total,
             "components": out["loss_components"],
             "out": out,
-            "projector_inputs": {"z_hat": z_hat, "z_y": z_y},
+            "projector_inputs": {"z_hat": z_hat_repr, "z_y": z_y},
             "projector_outputs": {"p_hat": p_hat_full, "p_y": p_y_full},
         }
 

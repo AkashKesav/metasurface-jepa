@@ -40,6 +40,7 @@ from encoders.spectrum_encoder import ReleasedSpectrumEncoder, SpectrumPath
 from encoders.target_encoder import EMAEncoder
 from losses.jepa_loss import jepa_loss
 from predictor.gclct import GCLCT
+from predictor.goal_residual import GoalResidualRoute
 
 PIXEL_GRID = 16  # 64 / patch_size 4
 
@@ -359,11 +360,13 @@ class UnifiedJEPA(nn.Module):
     def __init__(self, hidden=192, num_heads=6, geo_depth=6, predictor_depth=8,
                  goal_tokens=16, num_predictor_heads=6, scalar_hidden=128,
                  n_film_blocks=6, spec_dim=256, scalar_bounds=None,
-                 momentum_start=0.996, momentum_end=0.999):
+                 momentum_start=0.996, momentum_end=0.999,
+                 direct_goal_route=False):
         super().__init__()
         self.hidden = hidden
         self.num_heads = num_heads
         self.goal_tokens = goal_tokens
+        self.direct_goal_route = bool(direct_goal_route)
         self.architecture_id = UNIFIED_ARCHITECTURE_ID
 
         # Student encoders
@@ -389,6 +392,11 @@ class UnifiedJEPA(nn.Module):
         self.predictor = GCLCT(
             depth=predictor_depth, hidden=hidden, num_heads=num_predictor_heads,
             c_physics_dim=384,
+        )
+        self.goal_residual = (
+            GoalResidualRoute(hidden=hidden, goal_dim=384,
+                              num_heads=num_predictor_heads)
+            if self.direct_goal_route else None
         )
 
         # Scalar decode heads
@@ -517,11 +525,17 @@ class UnifiedJEPA(nn.Module):
         queries = torch.cat([occ_queries, scalar_query], dim=1)    # (B, 257, hidden)
 
         # 7. Predictor (c_physics 384→192 via c_phys_proj)
-        z_hat_raw, _ = self.predictor(queries, fused, c_physics)  # (B, 257, hidden)
+        z_hat_base, _ = self.predictor(queries, fused, c_physics)  # (B, 257, hidden)
+        z_hat = z_hat_base
+        goal_residual = torch.zeros_like(z_hat_base)
+        if self.goal_residual is not None:
+            goal_residual[:, :256, :] = self.goal_residual(
+                z_hat_base[:, :256, :], a_goal, ~vis_mask)
+            z_hat = z_hat_base + goal_residual
 
         # 8. Split predictions
-        occupancy_pred = z_hat_raw[:, :256, :]         # (B, 256, hidden)
-        scalar_summary_pred = z_hat_raw[:, 256, :]     # (B, hidden)
+        occupancy_pred = z_hat[:, :256, :]              # (B, 256, hidden)
+        scalar_summary_pred = z_hat[:, 256, :]          # (B, hidden)
 
         # 9. Scalar decode
         scalar_pred = self.scalar_decoder(scalar_summary_pred)  # (B, 3)
@@ -531,6 +545,8 @@ class UnifiedJEPA(nn.Module):
 
         out = dict(
             z_hat=occupancy_pred,
+            z_hat_base=z_hat_base[:, :256, :],
+            goal_residual=goal_residual[:, :256, :],
             z_x=z_x,
             mask=loss_mask,
             c_physics=c_physics,
@@ -681,6 +697,7 @@ def build_unified_model(cfg, spec_weights, device="cpu",
     kwargs.update(
         momentum_start=cfg.get("ema_momentum_start", 0.996),
         momentum_end=cfg.get("ema_momentum_end", 0.999),
+        direct_goal_route=cfg.get("direct_goal_route", False),
     )
 
     model = UnifiedJEPA(**kwargs)

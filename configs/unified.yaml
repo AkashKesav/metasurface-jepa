@@ -22,6 +22,7 @@ scalar_bounds:
   r_atom: [3.5, 5.0]
 
 variant: unified
+direct_goal_route: false  # opt-in architecture ablation; baseline unchanged
 hidden: 192
 num_heads: 6
 geo_depth: 6

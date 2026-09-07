@@ -154,6 +154,8 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step,
             "scalar_mae", "scalar_normalized_mae", "scalar_pred_min",
             "scalar_pred_max",
             "c_physics_cross_sample_std", "a_goal_cross_sample_std"]}
+    agg["goal_residual_norm"] = []
+    agg["goal_scale"] = []
     for key in ("raw_z_mse", "raw_z_cosine", "raw_z_hat_norm",
                 "raw_z_y_norm", "projected_mse", "projected_cosine",
                 "projected_pred_norm", "projected_target_norm"):
@@ -236,7 +238,11 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step,
         agg["scalar_pred_max"].append(float(out_r["scalar_pred"].max()))
         agg["c_physics_cross_sample_std"].append(float(out_r["c_physics"].std(dim=0).mean()))
         agg["a_goal_cross_sample_std"].append(float(out_r["a_goal"].std(dim=0).mean()))
-    out = {k: float(np.mean(v)) for k, v in agg.items()}
+        residual = out_r.get("goal_residual")
+        if residual is not None:
+            agg["goal_residual_norm"].append(float(residual[mask].norm(dim=-1).mean()))
+            agg["goal_scale"].append(float(model.goal_residual.goal_scale.detach()))
+    out = {k: float(np.mean(v)) for k, v in agg.items() if v}
     out["step"] = step
     model.train()
     return out
@@ -251,6 +257,8 @@ def main():
                     help="exploratory normalized raw-z alignment weight")
     ap.add_argument("--lambda-goal", type=float, default=0.0,
                     help="exploratory real-vs-shuffled margin-loss weight")
+    ap.add_argument("--direct-goal-route", action="store_true",
+                    help="enable direct masked-query spectrum residual route")
     ap.add_argument("--goal-margin", type=float, default=0.01,
                     help="exploratory normalized-physics margin")
     ap.add_argument("--total-steps", type=int, default=1500)
@@ -271,6 +279,7 @@ def main():
     set_seed(args.seed)
     cfg["loss"]["lambda_phys"] = args.lambda_phys
     cfg["loss"]["lambda_raw"] = args.lambda_raw
+    cfg["direct_goal_route"] = bool(args.direct_goal_route)
 
     data_root = Path(args.data_root)
     train_split = str(data_root / "split_data" / "train_set.mat")
@@ -469,6 +478,8 @@ def main():
             "lambda_goal": args.lambda_goal,
             "goal_margin": args.goal_margin,
             "lambda_raw": args.lambda_raw,
+            "direct_goal_route": bool(args.direct_goal_route),
+            "goal_residual": bool(args.direct_goal_route),
             "invalid_val_samples_skipped": invalid_val_samples,
             "invalid_train_samples_skipped": invalid_train_samples,
             "total_steps": args.total_steps,
