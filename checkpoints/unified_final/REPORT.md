@@ -177,6 +177,38 @@ reassembled to `188,426,071` bytes, and matched the emitted SHA-256:
 - Kaggle dataset: `anosvol/metadit-aaai2026-staging`;
 - final Kaggle kernel: `anosvol/metasurface-jepa-goal-margin-selected-v2`;
 - final checkpoint SHA-256: `2faa5ed7c3268a0faef9784a4ea650a4e340b308c0e3deefb7dea818910aec53`;
+
+## Direct masked-query goal-route ablation
+
+The first architecture fix was run on WSL Kaggle as
+`anosvol/metasurface-jepa-direct-goal-route-v1`, from commit `d51c826`, with
+the same dataset, seed 42, 1500 steps, `lambda_phys=0.2`, `lambda_goal=2.0`,
+and margin `0.01`. The new route was enabled with
+`direct_goal_route=true`.
+
+Final hard-stratum values:
+
+- physics real/null/shuffled: `0.476609 / 0.472747 / 0.516851`;
+- real-vs-null: **FAIL**; real-vs-shuffled: **PASS**;
+- geometry sensitivity null/shuffled: `0.066332 / 0.033509`;
+- occupancy IoU/F1: `0.690235 / 0.814658`;
+- scalar normalized MAE: `0.233824`, out-of-range fraction `0`;
+- raw latent cosine: `0.03393` (improved from `-0.06618`);
+- projected latent cosine: `0.996999`;
+- `c_physics`/`a_goal` cross-sample standard deviations:
+  `0.096845 / 0.141566`;
+- goal residual norm: `0.611992`, learned goal scale `0.100806`;
+- goal-path gradient norm mean/max: `1.0798 / 1250.78`.
+
+This ablation materially increased target-dependent geometry changes and
+improved raw latent alignment, but it did not make the real goal better than
+the null goal. It is therefore **not accepted as the production architecture**.
+The emitted checkpoint manifest specifies `191,558,371` bytes and SHA-256
+`952660f896e92c733c7b152f2b58f88aef3220ef8f1fd6cc013152fbb3132ed0`.
+The JSON manifest was retrieved; Kaggle exposed the shard payloads as zero-byte
+placeholders during this download, so local shard reassembly was not claimed.
+The next change must address goal direction/selection, not merely increase
+goal-path sensitivity.
 - seed: `42`;
 - hard-stratum validation batches: `8`;
 - one invalid training sample was skipped and recorded by the evaluator.
