@@ -154,8 +154,8 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step,
             "scalar_mae", "scalar_normalized_mae", "scalar_pred_min",
             "scalar_pred_max",
             "c_physics_cross_sample_std", "a_goal_cross_sample_std"]}
-    agg["goal_residual_norm"] = []
-    agg["goal_scale"] = []
+    # goal_residual_norm / goal_scale metrics REMOVED 2026-09-08 (goal-residual
+    # route retired; out["goal_residual"] is now always zeros for transition).
     for key in ("raw_z_mse", "raw_z_cosine", "raw_z_hat_norm",
                 "raw_z_y_norm", "projected_mse", "projected_cosine",
                 "projected_pred_norm", "projected_target_norm"):
@@ -238,10 +238,7 @@ def eval_goal_utility(model, surrogate, batches, device, generator, step,
         agg["scalar_pred_max"].append(float(out_r["scalar_pred"].max()))
         agg["c_physics_cross_sample_std"].append(float(out_r["c_physics"].std(dim=0).mean()))
         agg["a_goal_cross_sample_std"].append(float(out_r["a_goal"].std(dim=0).mean()))
-        residual = out_r.get("goal_residual")
-        if residual is not None:
-            agg["goal_residual_norm"].append(float(residual[mask].norm(dim=-1).mean()))
-            agg["goal_scale"].append(float(model.goal_residual.goal_scale.detach()))
+        # goal_residual / goal_scale logging REMOVED 2026-09-08 (route retired).
     out = {k: float(np.mean(v)) for k, v in agg.items() if v}
     out["step"] = step
     model.train()
@@ -255,14 +252,11 @@ def main():
     ap.add_argument("--lambda-phys", type=float, default=1.0)
     ap.add_argument("--lambda-raw", type=float, default=0.0,
                     help="exploratory normalized raw-z alignment weight")
-    ap.add_argument("--lambda-goal", type=float, default=0.0,
-                    help="exploratory real-vs-shuffled margin-loss weight")
-    ap.add_argument("--direct-goal-route", action="store_true",
-                    help="enable direct masked-query spectrum residual route")
-    ap.add_argument("--goal-margin", type=float, default=0.01,
-                    help="exploratory normalized-physics margin")
-    ap.add_argument("--goal-null-weight", type=float, default=1.0,
-                    help="relative weight for real-vs-null goal ranking")
+    # Goal-ranking flags (--lambda-goal/--direct-goal-route/--goal-margin/
+    # --goal-null-weight) REMOVED 2026-09-08: the goal-residual route was
+    # retired by the Joint Target Redesign; goal sensitivity is now a Stage-D
+    # property of the joint target, not a bolt-on ranking loss on a
+    # geometry-only target. Kept --total-steps/--eval-every/etc.
     ap.add_argument("--total-steps", type=int, default=1500)
     ap.add_argument("--eval-every", type=int, default=250)
     ap.add_argument("--output-dir", default=str(REPO_ROOT / "results" / "stage4"))
@@ -281,11 +275,8 @@ def main():
     set_seed(args.seed)
     cfg["loss"]["lambda_phys"] = args.lambda_phys
     cfg["loss"]["lambda_raw"] = args.lambda_raw
-    cfg["direct_goal_route"] = bool(args.direct_goal_route)
-    if args.lambda_goal > 0:
-        # The pairwise goal objective must use a real-goal anchor. Do not let
-        # classifier-free dropout silently turn the anchor into a null goal.
-        cfg.setdefault("train", {})["guidance_dropout"] = 0.0
+    # direct_goal_route is retired (Joint Target Redesign); build_unified_model
+    # ignores the flag. Do not set it here.
 
     data_root = Path(args.data_root)
     train_split = str(data_root / "split_data" / "train_set.mat")
@@ -410,32 +401,9 @@ def main():
             masker, rng, regime_logger, surrogate=surrogate,
             scalar_masker_bank=scalar_bank)
         loss = result["total_loss"]
-        goal_term = loss.new_zeros(())
-        goal_term_shuffled = loss.new_zeros(())
-        goal_term_null = loss.new_zeros(())
-        if args.lambda_goal > 0 and spec.shape[0] > 1:
-            # Derangement for the training batch: the requested target is
-            # changed while geometry, mask, and scalar-known state stay fixed.
-            goal_spec = torch.roll(spec, shifts=1, dims=0)
-            # Comparison branches are references, not optimization targets.
-            # Detach them so ranking cannot pass by deliberately damaging the
-            # null/shuffled predictions instead of improving the real branch.
-            with torch.no_grad():
-                out_shuf = model(occ, sv, sk, goal_spec, M, goal_mode="real")
-                out_null = model(occ, sv, sk, spec, M, goal_mode="null")
-            p_real, _, _ = physics_loss_from_out(
-                model, result["out"], surrogate, occ, sv, sk, spec, M,
-                loss_type="smooth_l1", use_ste=True, normalize=True)
-            p_shuf, _, _ = physics_loss_from_out(
-                model, out_shuf, surrogate, occ, sv, sk, spec, M,
-                loss_type="smooth_l1", use_ste=True, normalize=True)
-            p_null, _, _ = physics_loss_from_out(
-                model, out_null, surrogate, occ, sv, sk, spec, M,
-                loss_type="smooth_l1", use_ste=True, normalize=True)
-            goal_term_shuffled = torch.relu(args.goal_margin + p_real - p_shuf)
-            goal_term_null = torch.relu(args.goal_margin + p_real - p_null)
-            goal_term = goal_term_shuffled + args.goal_null_weight * goal_term_null
-            loss = loss + args.lambda_goal * goal_term
+        # Goal-ranking margin loss REMOVED 2026-09-08 (Joint Target Redesign:
+        # goal sensitivity is a Stage-D property of the joint target, not a
+        # bolt-on ranking loss). loss is now just the training objective.
         loss.backward()
         goal_grad_sq = 0.0
         for name, parameter in model.named_parameters():
@@ -460,11 +428,7 @@ def main():
         if (step + 1) % cfg["train"].get("log_every_steps", 10) == 0:
             print(f"[step {step+1}/{args.total_steps}] "
                   f"L_total={result['components']['L_total']:.3f} "
-                  f"L_phys={result['components'].get('L_phys', 0):.3f} "
-                  f"L_goal={float(goal_term.detach()):.4f} "
-                  f"(shuf={float(goal_term_shuffled.detach()):.4f}, "
-                  f"null={float(goal_term_null.detach()):.4f}) "
-                  f"goal_grad={goal_grad_norm:.3e}")
+                  f"L_phys={result['components'].get('L_phys', 0):.3f}")
 
         if (step + 1) % args.eval_every == 0:
             m = eval_goal_utility(model, surrogate, fixed_batches, device, rng,
@@ -511,13 +475,11 @@ def main():
             "config_sha256": config_sha,
             "dataset_root": str(data_root),
             "seed": args.seed,
-            "lambda_goal": args.lambda_goal,
-            "goal_margin": args.goal_margin,
-            "goal_null_weight": args.goal_null_weight,
             "guidance_dropout": cfg["train"].get("guidance_dropout", 0.0),
             "lambda_raw": args.lambda_raw,
-            "direct_goal_route": bool(args.direct_goal_route),
-            "goal_residual": bool(args.direct_goal_route),
+            # goal-ranking fields (lambda_goal/goal_margin/goal_null_weight/
+            # direct_goal_route/goal_residual) REMOVED 2026-09-08 with the
+            # retired goal-residual route.
             "invalid_val_samples_skipped": invalid_val_samples,
             "invalid_train_samples_skipped": invalid_train_samples,
             "total_steps": args.total_steps,
@@ -525,8 +487,8 @@ def main():
             "validation_batch_count": len(fixed_batches),
             "validation_sample_ids": validation_sample_ids,
             "regime_report": regime_logger.report(),
-            "goal_path_grad_norm_mean": float(np.mean(goal_grad_history)),
-            "goal_path_grad_norm_max": float(np.max(goal_grad_history)),
+            "spectrum_path_grad_norm_mean": float(np.mean(goal_grad_history)),
+            "spectrum_path_grad_norm_max": float(np.max(goal_grad_history)),
             "checkpoint": str(out_dir / "latest.pt"),
             "checkpoint_manifest": checkpoint_manifest,
         }, f, indent=2)

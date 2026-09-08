@@ -22,7 +22,9 @@ scalar_bounds:
   r_atom: [3.5, 5.0]
 
 variant: unified
-direct_goal_route: false  # opt-in architecture ablation; baseline unchanged
+# direct_goal_route: RETIRED 2026-09-08 (Joint Target Redesign supersedes it).
+# Left commented for provenance; build_unified_model ignores the flag regardless.
+# direct_goal_route: false
 hidden: 192
 num_heads: 6
 geo_depth: 6
