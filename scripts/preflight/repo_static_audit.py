@@ -86,7 +86,8 @@ EXCLUDE_FILES = {
     "runtime/device.py",  # This is the canonical device module
     "runtime/reproducibility.py",  # This is the canonical RNG module
     "train/engine.py",  # This is the canonical training engine
-    "train_milestone_b.py",  # This is the canonical training script
+    "train_unified.py",  # Canonical ACTIVE training script (unified line, Joint Target Redesign)
+    "train_milestone_b.py",  # Canonical LEGACY training script (Milestone-B line)
     "checkpoint_integrity_check.py",  # Preflight script
     "milestone_b_preflight.py",  # Preflight script
     "repo_static_audit.py",  # This script
@@ -97,6 +98,7 @@ EXCLUDE_FILES = {
 ALLOWED_CONTEXT = {
     "device_cuda_call": [
         "src/runtime/device.py",  # Canonical device resolution
+        "scripts/train/train_unified.py",  # Device selection in training script
         "scripts/train/train_milestone_b.py",  # Device selection in training script
         "scripts/eval/",  # Eval scripts may need device
         "notebooks/",  # Notebooks
@@ -104,9 +106,11 @@ ALLOWED_CONTEXT = {
     "rng_manual_seed": [
         "src/runtime/reproducibility.py",  # Canonical RNG
         "src/data/mask.py",  # BlockMasker uses Generator
+        "src/data/scalar_mask.py",  # ScalarMasker uses module-owned Generator
         "src/losses/sigreg.py",  # SIGReg uses Generator
         "src/runtime/physics_controls.py",  # Physics controls use Generator
         "src/data/epoch_sampler.py",  # DeterministicEpochSampler uses Generator
+        "scripts/train/train_unified.py",  # Seed setting in training script
         "scripts/train/train_milestone_b.py",  # Seed setting in training script
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
@@ -114,20 +118,25 @@ ALLOWED_CONTEXT = {
         "scripts/eval/",  # Eval scripts
     ],
     "optimizer_adamw": [
+        "scripts/train/train_unified.py",  # Canonical optimizer creation
         "scripts/train/train_milestone_b.py",  # Canonical optimizer creation
+        "scripts/train/train_phase1_decoder.py",  # LEGACY Phase-1 decoder experiment (retained for provenance)
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
         "scripts/eval/",  # Eval scripts
     ],
     "optimizer_step": [
+        "scripts/train/train_unified.py",  # Canonical optimizer step
         "scripts/train/train_milestone_b.py",  # Canonical optimizer step
+        "scripts/train/train_phase1_decoder.py",  # LEGACY Phase-1 decoder experiment (retained for provenance)
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
         "scripts/eval/",  # Eval scripts
     ],
     "objective_on_step": [
+        "scripts/train/train_unified.py",  # Canonical
         "scripts/train/train_milestone_b.py",  # Canonical
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
@@ -136,7 +145,9 @@ ALLOWED_CONTEXT = {
     ],
     "torch_save": [
         "src/train/engine.py",  # Canonical checkpoint save
+        "scripts/train/train_unified.py",  # Training script
         "scripts/train/train_milestone_b.py",  # Training script
+        "scripts/train/train_phase1_decoder.py",  # LEGACY Phase-1 decoder experiment (retained for provenance)
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
@@ -147,11 +158,15 @@ ALLOWED_CONTEXT = {
         "src/encoders/spectrum_encoder.py",  # SpectrumEncoder.proj is a different thing
         "src/losses/objectives.py",  # Documents the no-model.proj rule
         "src/losses/objective_modules.py",  # Documents the no-model.proj rule
+        "src/losses/unified_losses.py",  # Documents the no-model.proj rule
         "src/train/engine.py",  # Documents the no-model.proj rule
         "scripts/eval/decisive_representation_validation.py",  # Documents the no-model.proj rule
+        "scripts/train/train_phase1_decoder.py",  # LEGACY: local scalar proj, not model.proj
     ],
     "stale_latest_pt": [
+        "scripts/train/train_unified.py",  # Training script references (checkpoints/unified/latest.pt convention)
         "scripts/train/train_milestone_b.py",  # Training script references
+        "scripts/train/train_phase1_decoder.py",  # LEGACY Phase-1 decoder experiment
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
@@ -178,6 +193,10 @@ ALLOWED_CONTEXT = {
         "checkpoints/",  # Historical reports
         "tests/",  # Tests
         "src/predictor/gclct.py",  # Documents guidance as future work
+        "src/predictor/guidance.py",  # LIVE module: goal_dropout for null-goal training
+        "src/diagnostics/guidance_gap.py",  # LIVE diagnostic
+        "scripts/diagnostics/",  # Diagnostics scripts (guidance-gap sweep)
+        "scripts/train/train_unified.py",  # Imports goal_dropout (live usage)
     ],
     "stale_routing": [
         "docs/",  # Documentation
@@ -185,11 +204,18 @@ ALLOWED_CONTEXT = {
         "tests/",  # Tests
         "src/diagnostics/goal_token_entropy.py",  # Documents routing analysis
         "src/predictor/gclct.py",  # Documents routing as future work
+        "src/predictor/joint_target_fusion.py",  # Documents the §13 "do not add yet" routing rule
     ],
     "stale_geometry_decoder": [
         "docs/",  # Documentation
         "checkpoints/",  # Historical reports
         "tests/",  # Tests
+        "src/assembly.py",  # LIVE: UnifiedJEPA.geometry_decoder attribute (historical name)
+        "src/decoders/",  # Legacy-line decoder module (retained)
+        "scripts/train/train_unified.py",  # LIVE: unified model attribute usage
+        "scripts/train/train_phase1_decoder.py",  # LEGACY Phase-1 decoder experiment
+        "scripts/eval/eval_phase1_decoder.py",  # LEGACY Phase-1 decoder eval
+        "scripts/diagnostics/protocol_v1/",  # Diagnostics protocol (uses the attribute)
     ],
 }
 
@@ -294,11 +320,11 @@ def main():
     # Canonical files where these patterns ARE allowed
     canonical_files = {
         "device_cuda_call": {"src/runtime/device.py"},
-        "rng_manual_seed": {"src/runtime/reproducibility.py", "src/data/mask.py", "src/losses/sigreg.py", "src/runtime/physics_controls.py", "src/train/engine.py"},
-        "optimizer_adamw": {"scripts/train/train_milestone_b.py"},
-        "optimizer_step": {"scripts/train/train_milestone_b.py"},
-        "objective_on_step": {"scripts/train/train_milestone_b.py"},
-        "torch_save": {"src/train/engine.py", "scripts/train/train_milestone_b.py"},
+        "rng_manual_seed": {"src/runtime/reproducibility.py", "src/data/mask.py", "src/data/scalar_mask.py", "src/losses/sigreg.py", "src/runtime/physics_controls.py", "src/train/engine.py"},
+        "optimizer_adamw": {"scripts/train/train_unified.py", "scripts/train/train_milestone_b.py", "scripts/train/train_phase1_decoder.py"},
+        "optimizer_step": {"scripts/train/train_unified.py", "scripts/train/train_milestone_b.py", "scripts/train/train_phase1_decoder.py"},
+        "objective_on_step": {"scripts/train/train_unified.py", "scripts/train/train_milestone_b.py"},
+        "torch_save": {"src/train/engine.py", "scripts/train/train_unified.py", "scripts/train/train_milestone_b.py", "scripts/train/train_phase1_decoder.py"},
     }
 
     has_critical = False
@@ -318,9 +344,9 @@ def main():
         print(f"\n[FAIL] Critical patterns found in non-canonical locations.")
         print("These should be consolidated into the canonical modules:")
         print("  - Device: src/runtime/device.py")
-        print("  - RNG: src/runtime/reproducibility.py, src/data/mask.py, src/losses/sigreg.py, src/runtime/physics_controls.py, src/train/engine.py")
-        print("  - Training loop: src/train/engine.py + scripts/train/train_milestone_b.py")
-        print("  - Checkpoint: src/train/engine.py + scripts/train/train_milestone_b.py")
+        print("  - RNG: src/runtime/reproducibility.py, src/data/mask.py, src/data/scalar_mask.py, src/losses/sigreg.py, src/runtime/physics_controls.py, src/train/engine.py")
+        print("  - Training loop: src/train/engine.py + scripts/train/train_unified.py (active) / train_milestone_b.py (legacy)")
+        print("  - Checkpoint: src/train/engine.py + scripts/train/train_unified.py (active) / train_milestone_b.py (legacy)")
         return 1
 
     # Stale references check

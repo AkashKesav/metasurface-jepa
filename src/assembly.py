@@ -473,7 +473,13 @@ class UnifiedJEPA(nn.Module):
             scalar_known:   [B,3] bool — which scalars are observed.
             spectrum:       [B,2,301] target spectrum.
             mask:           [B,16,16]  1=visible, 0=masked.
-            goal_mode:      "real" | "null" | "shuffled"
+            goal_mode:      "real" | "null" (only). "shuffled" is NOT a model
+                            goal_mode — SpectrumPath treats any non-"null"
+                            value as "real" and validate_goal_mode rejects
+                            it; shuffled controls are built externally by
+                            deranging the spectrum tensor
+                            (runtime.physics_controls.make_shuffled_spectrum)
+                            and then run with goal_mode="real".
             with_target:    compute EMA target latent z_y_raw.
             need_attn:      return attention weights.
 

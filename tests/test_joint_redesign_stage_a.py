@@ -47,13 +47,13 @@ def test_joint_fusion_shape_contract():
 
 
 def test_joint_fusion_zero_gate_init_has_zero_delta():
-    """At construction (gate=0, tanh(0)=0) the fusion's physics delta is zero,
-    so the ONLY operation applied to Z_G is the output LayerNorm (which with
-    default identity affine normalizes the geometry stream). The stable-init
-    invariant is 'the spectrum contributes nothing at step 0' — i.e. the
-    output is independent of Z_S — NOT that the output byte-equals Z_G (the
-    output norm normalizes Z_G). Verify the delta contribution is exactly zero
-    and that the output is the same for any Z_S at init."""
+    """At construction (gate=0, tanh(0)=0) the fusion's physics delta is zero
+    and the output is BIT-IDENTICAL to Z_G — the §3 stable-init property
+    ("Initialize gate = 0. This gives stable initialization"): the joint
+    target equals the old geometry-only target exactly at step 0, so the
+    JEPA loss at init is identical to the pre-redesign objective. Also
+    verify the output is independent of Z_S at init (the spectrum
+    contributes nothing until the gate opens)."""
     f = JointTargetFusion(hidden=H, num_heads=6)
     assert float(f.gate) == 0.0, "gate must initialize to 0.0"
     assert float(torch.tanh(f.gate)) == 0.0, "tanh(gate) must be 0 at init"
@@ -63,8 +63,14 @@ def test_joint_fusion_zero_gate_init_has_zero_delta():
     with torch.no_grad():
         out1 = f(z_g, z_s1)
         out2 = f(z_g, z_s2)
+    # Bit-identical to the geometry-only target at init (regression lock:
+    # an output LayerNorm on the residual stream would break this — it
+    # renormalizes Z_G even at gate=0).
+    assert torch.equal(out1, z_g), (
+        "at gate=0 the output must equal Z_G exactly (spec §3 stable init); "
+        "an output norm on the residual stream violates this")
     # Z_S-independent at init: the spectrum contributes nothing.
-    assert torch.allclose(out1, out2, atol=1e-7), (
+    assert torch.equal(out1, out2), (
         "at gate=0 the output must be independent of Z_S "
         "(physics delta is zero); stable init")
 

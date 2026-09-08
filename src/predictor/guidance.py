@@ -5,8 +5,10 @@ During training: replace A_goal with learned null token A_∅ with probability
 
     Z_guided = P(Z_x, A_∅) + w · [P(Z_x, A_goal) − P(Z_x, A_∅)]
 
-The model's forward already supports goal_mode in {"real", "null", "shuffled"}
-via spectrum_path. This module provides the CFG combine logic and the
+The model's forward supports goal_mode in {"real", "null"} via spectrum_path.
+Shuffled-goal controls are built OUTSIDE the model by deranging the spectrum
+tensor (runtime.physics_controls.make_shuffled_spectrum) and evaluated with
+goal_mode="real". This module provides the CFG combine logic and the
 guidance-gap diagnostic (§20.3).
 """
 

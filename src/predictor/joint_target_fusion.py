@@ -93,12 +93,13 @@ class JointTargetFusion(nn.Module):
         # Zero-initialized scalar gate: at construction Z_joint == Z_G exactly.
         # tanh(0) = 0 -> delta contributes nothing until training opens the gate.
         self.gate = nn.Parameter(torch.zeros(()))
-        # Pre-/post-norm on the residual add (geometry is the residual stream);
-        # the delta is computed in a normalized space so attention scale is
-        # invariant to the geometry encoder's output magnitude.
+        # Pre-norms on the attention INPUTS only (geometry is the residual
+        # stream and passes through unmodified, so at gate=0 the output is
+        # bit-identical to Z_G per §3 "Initialize gate = 0 ... stable
+        # initialization"). Normalizing the residual stream itself would break
+        # that identity — do not add an output norm here.
         self.norm_q = nn.LayerNorm(hidden)
         self.norm_kv = nn.LayerNorm(hidden)
-        self.norm_out = nn.LayerNorm(hidden)
 
     def forward(self, z_g: torch.Tensor, z_s: torch.Tensor) -> torch.Tensor:
         """Compute the joint target latent.
@@ -139,8 +140,11 @@ class JointTargetFusion(nn.Module):
         delta = delta.transpose(1, 2).reshape(b, n_g, self.hidden)
         delta = self.out_proj(delta)
         delta = self.dropout(delta)
-        # Gated residual: at init gate=tanh(0)=0 -> z_joint == z_g exactly.
-        return self.norm_out(z_g + torch.tanh(self.gate) * delta)
+        # Gated residual: at init gate=tanh(0)=0 -> z_joint == z_g exactly
+        # (bit-identical to the geometry-only target — the §3 stable-init
+        # property). No output norm: it would renormalize Z_G at gate=0 and
+        # break the identity.
+        return z_g + torch.tanh(self.gate) * delta
 
     def extra_repr(self) -> str:
         return (f"hidden={self.hidden}, num_heads={self.num_heads}, "
