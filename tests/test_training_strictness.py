@@ -366,6 +366,14 @@ def test_real_mode_missing_spectrum_weights_raises():
         _ensure_spectrum_weights(missing, "cpu", allow_dummy=False)
 
 
+_HAS_REAL_DATA = os.path.exists(
+    os.path.join(REPO_ROOT, "data/metadit/split_data/train_set.mat"))
+
+
+@pytest.mark.skipif(
+    not _HAS_REAL_DATA,
+    reason="real training split not present — surrogate checks reach the "
+           "data-missing guard before the surrogate-missing guard")
 def test_real_mode_missing_surrogate_with_physics_raises():
     """Fix 3 (spec §5): real mode with lambda_phys > 0 and a missing surrogate
     checkpoint must RAISE before training begins — never silently continue
@@ -378,6 +386,10 @@ def test_real_mode_missing_surrogate_with_physics_raises():
         train(cfg, no_train=True, device="cpu", use_synthetic_smoke=False)
 
 
+@pytest.mark.skipif(
+    not _HAS_REAL_DATA,
+    reason="real training split not present — train() raises on missing data "
+           "before reaching the surrogate-optional path")
 def test_real_mode_missing_surrogate_without_physics_is_legal():
     """Fix 3 (spec §5): lambda_phys = 0 with a missing surrogate must remain
     legal — no physics loss requested, so no surrogate is needed (and random

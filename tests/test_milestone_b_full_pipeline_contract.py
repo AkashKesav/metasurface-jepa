@@ -46,6 +46,14 @@ from train.engine import (
 from scripts.train.train_milestone_b import CosineWarmup, build_scheduler
 from runtime.device import resolve_device
 
+import pytest
+
+_SPEC_WEIGHTS = os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth")
+_skip_no_spec = pytest.mark.skipif(
+    not os.path.exists(_SPEC_WEIGHTS),
+    reason="spectrum encoder weights not present (data/metadit/weights/ is "
+           "git-ignored, staged on cloud per CLOUD_TRAINING.md)")
+
 
 class _TinyMetaDiTDataset(torch.utils.data.Dataset):
     """Tiny synthetic dataset mimicking MetaDiT shapes for testing."""
@@ -63,6 +71,7 @@ def collate_batch(batch):
     return G, S
 
 
+@_skip_no_spec
 def test_milestone_b_full_pipeline_contract():
     """Full pipeline contract test with tiny config."""
     device = resolve_device("cpu")
@@ -355,6 +364,7 @@ def _run_training_cli(config_path, extra_args, env_threads="1"):
                           env=env, timeout=900)
 
 
+@_skip_no_spec
 def test_production_cli_smoke_max_steps_2():
     """A3: the real CLI runs 2 optimizer steps end-to-end and writes a full-schema checkpoint."""
     import torch

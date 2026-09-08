@@ -20,7 +20,16 @@ from scripts.train.train_milestone_b import build_scheduler
 from data.mask import BlockMasker
 from runtime.device import resolve_device
 
+import pytest
 
+_SPEC_WEIGHTS = os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth")
+_skip_no_spec = pytest.mark.skipif(
+    not os.path.exists(_SPEC_WEIGHTS),
+    reason="spectrum encoder weights not present (data/metadit/weights/ is "
+           "git-ignored, staged on cloud per CLOUD_TRAINING.md)")
+
+
+@_skip_no_spec
 def test_best_checkpoint_schema():
     device = resolve_device("cpu")
     cfg = {

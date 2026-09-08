@@ -30,6 +30,7 @@ import random
 import sys
 
 import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
@@ -261,6 +262,10 @@ def test_cuda_rng_state_roundtrip_when_available():
                zip(torch.cuda.get_rng_state_all(), c1))
 
 
+@pytest.mark.skipif(
+    torch.cuda.is_available(),
+    reason="This test verifies CPU-only safe-skip behavior; on CUDA machines "
+           "the fake GPU state is a real restore target, not a skip case")
 def test_cuda_state_restore_skipped_safely_on_cpu():
     """A checkpoint saved on GPU (torch_cuda_rng present) restored on a CPU-only
     machine must skip the CUDA part, not error (and vice versa: None is fine)."""

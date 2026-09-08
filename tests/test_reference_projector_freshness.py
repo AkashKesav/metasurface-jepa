@@ -12,12 +12,19 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 import torch
+import pytest
 from train.engine import (
     build_deterministic_reference, fixed_validation_from_loader, healthy_references,
 )
 from data.mask import BlockMasker
 from assembly import build_model
 from losses.objectives import build_objective
+
+_SPEC_WEIGHTS = os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth")
+_skip_no_spec = pytest.mark.skipif(
+    not os.path.exists(_SPEC_WEIGHTS),
+    reason="spectrum encoder weights not present (data/metadit/weights/ is "
+           "git-ignored, staged on cloud per CLOUD_TRAINING.md)")
 
 
 class _TinyMetaDiTDataset(torch.utils.data.Dataset):
@@ -29,6 +36,7 @@ class _TinyMetaDiTDataset(torch.utils.data.Dataset):
     def __getitem__(self, i): return self.G[i], self.S[i]
 
 
+@_skip_no_spec
 def test_reference_projector_freshness():
     """Healthy reference must use the CURRENT objective's projector."""
     device = torch.device("cpu")

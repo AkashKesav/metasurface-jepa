@@ -26,6 +26,14 @@ from train.engine import (
 from scripts.train.train_milestone_b import build_scheduler
 from runtime.device import resolve_device
 
+import pytest
+
+_SPEC_WEIGHTS = os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth")
+_skip_no_spec = pytest.mark.skipif(
+    not os.path.exists(_SPEC_WEIGHTS),
+    reason="spectrum encoder weights not present (data/metadit/weights/ is "
+           "git-ignored, staged on cloud per CLOUD_TRAINING.md)")
+
 
 class _TinyMetaDiTDataset(torch.utils.data.Dataset):
     def __init__(self, n=8, seed=0):
@@ -62,6 +70,7 @@ def _make_tiny_setup(device, seed=0):
     return model, objective, optimizer, scheduler, masker, cfg
 
 
+@_skip_no_spec
 def test_mid_epoch_resume():
     """Resume from mid-epoch checkpoint restores exact micro_step."""
     device = resolve_device("cpu")
@@ -170,6 +179,7 @@ def test_mid_epoch_resume():
     print("PASS: test_mid_epoch_resume")
 
 
+@_skip_no_spec
 def test_epoch_end_resume():
     """Resume from epoch-end checkpoint restores to next epoch."""
     device = resolve_device("cpu")
@@ -386,6 +396,7 @@ def _assert_states_equal(a, b, label):
             assert _deep_equal(ra, rb), f"{label}: {key}"
 
 
+@_skip_no_spec
 def test_production_cli_mid_epoch_stop_then_resume_matches_uninterrupted():
     """A4: stop mid-epoch via CLI, resume via CLI, compare against one clean run."""
     with tempfile.TemporaryDirectory() as td_runA, \
