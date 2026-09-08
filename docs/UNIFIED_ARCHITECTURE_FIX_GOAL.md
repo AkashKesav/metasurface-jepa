@@ -1,5 +1,30 @@
 # Unified JEPA Architecture-Fix Goal
 
+> ## STATUS: DISABLED / SUPERSEDED — 2026-09-08
+>
+> **This plan is no longer active. Do not execute it.**
+>
+> Superseded by [`docs/JOINT_TARGET_REDESIGN.md`](JOINT_TARGET_REDESIGN.md), which changes
+> the JEPA *target* itself (`Z_joint = J(Z_G, Z_S)` via cross-attention) instead of adding a
+> goal route on top of a geometry-only target.
+>
+> Specifically disabled by operator decision on 2026-09-08:
+>
+> - the audit conclusion's remedy (direct goal route) — §Controlled architecture experiment
+> - the required comparisons list — §Required comparisons
+> - the acceptance gates — §Acceptance gates
+> - the Stage A / B / C execution order — §Execution order
+> - the ranking-terms addition (`L_goal_shuffled`, `L_goal_null`) — §Improvement after the
+>   first ablation
+>
+> Content below is retained verbatim for provenance only. The associated code paths
+> (`direct_goal_route`, `--lambda-goal`) are already off by default and remain disabled.
+>
+> Rationale: `docs/UNIFIED_ORIGINAL_ARCHITECTURE.md` §14 and this document's own audit
+> conclusion both establish that a geometry-only EMA target can only ever *reward* spectrum
+> use, never require it. Adding goal routes or ranking terms to a geometry-only target does
+> not remove that structural limitation; changing the target does.
+
 ## Objective
 
 Make the unified model reliably target-conditioned for inverse design.
