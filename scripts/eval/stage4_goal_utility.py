@@ -295,6 +295,16 @@ def main():
                                 device=device)
     set_spectrum_path(model, str(data_root / "weights" / "spec_encoder.pth"), device=device)
     _init_geometry_from_metadit(model, str(data_root / "weights" / "metadit-small.bin"))
+    # Bug fix (EMA init order): _init_geometry_from_metadit loads MetaDiT weights into the
+    # STUDENT occupancy_encoder only, leaving model.ema.target as a random-init deepcopy.
+    # Resync both EMA shadows to the freshly-initialized student so xi(0)=theta(0) holds at
+    # step 0 (Milestone-B collapse cause #1 / fix B1 semantics). build_unified_model already
+    # does this resync at construction, but that runs BEFORE the MetaDiT init here.
+    model.ema.target.load_state_dict(model.occupancy_encoder.state_dict())
+    model.scalar_mlp_ema.target.load_state_dict(model.scalar_encoder.state_dict())
+    # Bug fix (momentum schedule): set total_steps so the 0.996 -> 0.999 ramp actually happens
+    # instead of pinning at momentum_end (total_steps defaults to 1 in EMAEncoder).
+    model.set_total_steps(args.total_steps)
     surrogate = load_surrogate(str(data_root / "weights" / "surrogate_model.bin"), device=device)
     objective = UnifiedJEPALoss(
         hidden=cfg["hidden"],
@@ -440,6 +450,12 @@ def main():
         optimizer.step()
         scheduler.step()
         _assert_no_ema_gradients(model, step)
+        # Bug fix (EMA update): drive the EMA target encoders after the optimizer step, exactly
+        # as UnifiedJEPALoss.on_optimizer_step does in train_unified.py (L810). Without this
+        # call the EMA stays frozen at its initialization for the whole run (the target never
+        # tracks the student -> raw latent drifts to orthogonality while projected alignment
+        # overfits a fixed target). This was missing entirely from the stage4 loop.
+        objective.on_optimizer_step(model, step)
 
         if (step + 1) % cfg["train"].get("log_every_steps", 10) == 0:
             print(f"[step {step+1}/{args.total_steps}] "

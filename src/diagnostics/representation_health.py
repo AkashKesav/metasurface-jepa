@@ -51,6 +51,15 @@ def eff_ranks(X):
 
     NOTE (2026-08-17): previously returned the entropy H itself under the
     "eff_rank_unnorm" name, and H/log(D) under "eff_rank_frac" — both wrong scales.
+
+    CONTRACT (2026-09-08): ``eff_rank_frac`` divides by ``n = p.numel()`` — the number
+    of SVD singular values returned, which is ``min(B, D)``. For a small-batch
+    mean-pooled latent like ``(B=2, D)`` this yields only 2 singular values, so
+    ``eff_rank_frac`` is mathematically floored at 0.5 and CANNOT detect collapse.
+    Callers MUST pass a matrix with many rows (e.g. the token-level latent
+    ``z[mask]`` of shape ``(N_tokens, D)`` with ``N_tokens >> D``), never a
+    batch-mean of a 2-sample batch. Computing it on a (B=2, D) matrix silently
+    pinned a collapse monitor at 0.5 for an entire run.
     """
     Xc = X - X.mean(0, keepdim=True)
     s = torch.linalg.svdvals(Xc)

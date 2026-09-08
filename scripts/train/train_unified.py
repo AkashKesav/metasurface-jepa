@@ -568,6 +568,11 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         spec_path, device, allow_dummy=use_synthetic_smoke)
     model = build_unified_model(cfg, spec_weights, device=device)
     cfg.setdefault("_architecture_id", model.architecture_id)
+    # Bug fix (momentum schedule): set total_steps so the EMA momentum actually ramps
+    # 0.996 -> 0.999 across training instead of pinning at momentum_end. EMAEncoder's
+    # total_steps defaults to 1, so current_momentum(step) returns momentum_end for every
+    # step >= 1 and the documented ramp never happens.
+    model.set_total_steps(total_steps)
 
     # --- objective ---
     loss_cfg = cfg.get("loss", {})
