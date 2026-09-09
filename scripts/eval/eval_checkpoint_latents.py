@@ -68,6 +68,13 @@ def _sample_mask(masker, occ, ratio, surrogate=None):
     return m1.repeat(b, 1, 1)
 
 
+def _isnan(v):
+    try:
+        return bool(np.isnan(float(v)))
+    except (TypeError, ValueError):
+        return True
+
+
 def _collapse_stats(x):
     """VICReg-style representation-health numbers for a [N, D] tensor.
 
@@ -214,6 +221,72 @@ def evaluate(model, objective, batches, mask_ratio, device, grid=16):
     return res
 
 
+def verdict_from_metrics(m):
+    """Turn one mask-ratio metrics dict into (failures, notes).
+
+    Kept separate from main() so the gate can be unit-tested against the
+    Stage-A failure signature without loading a real 89 MB checkpoint.
+
+    Each check below exists because it caught a specific measured failure:
+      - collapse        : Stage-A predictor emitted one vector for every
+                          masked token (concentration 0.00064) while the loss
+                          read 1e-5.
+      - scale mismatch  : Stage-A ||z_hat||/||z_y|| = 0.061, invisible to a
+                          cosine-only objective.
+      - fusion dominates: Stage-A ||Z_joint - Z_geo|| / ||Z_geo|| = 4.66.
+      - goal dead       : Stage-A normalized spectrum sensitivity 0.0034.
+    """
+    failed, notes = [], []
+
+    conc = m.get("z_hat_concentration")
+    if conc is not None and not _isnan(conc):
+        if conc < 0.01:
+            failed.append(
+                f"COLLAPSE: predictor emits ~one vector for every masked token "
+                f"(std/norm={conc:.3g} < 0.01)")
+        else:
+            notes.append(f"predictor varies across tokens (std/norm={conc:.3g})")
+
+    sr = m.get("scale_ratio_zh_zy")
+    if sr is not None and not _isnan(sr):
+        if not (0.5 <= sr <= 2.0):
+            failed.append(
+                f"SCALE MISMATCH: ||z_hat||/||z_y||={sr:.3g} — invisible to a "
+                f"cosine-only loss, so L_total is not evidence of learning")
+        else:
+            notes.append(f"prediction/target magnitudes agree (ratio={sr:.3g})")
+
+    rmse = m.get("raw_mse")
+    if rmse is not None and not _isnan(rmse) and rmse > 1.0:
+        notes.append(f"raw_mse={rmse:.4g} (absolute latent error)")
+
+    jr = m.get("joint_target_delta_rel")
+    if jr is not None and not _isnan(jr):
+        if jr > 1.0:
+            failed.append(
+                f"FUSION DOMINATES: ||Z_joint - Z_geo|| / ||Z_geo|| = {jr:.3g} "
+                f"> 1 — the target is no longer geometry-anchored")
+        else:
+            notes.append(f"fusion is a bounded perturbation of Z_geo ({jr:.3g})")
+
+    s = m.get("target_spec_sensitivity_normalized")
+    if s is not None and not _isnan(s):
+        # 1% of the target norm is the smallest coupling that could plausibly
+        # steer an inverse-design search.
+        if s < 0.01:
+            failed.append(
+                f"GOAL DEAD: shuffling the goal spectrum moves the target by "
+                f"{s:.3g} of its norm (< 1%) — conditioning is not usable")
+        else:
+            notes.append(f"goal coupling ACTIVE (norm sensitivity={s:.3g})")
+
+    g = m.get("joint_gate_tanh")
+    if g is not None:
+        notes.append(f"fusion gate tanh={g:.4g} "
+                     f"({'open' if abs(g) > 1e-3 else 'closed at init'})")
+    return failed, notes
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
@@ -329,56 +402,7 @@ def main():
     # --- verdict ---
     r_main = f"r{ratios[min(1, len(ratios)-1)]:g}"
     m = report["by_mask_ratio"][r_main]
-    notes = []
-    failed = []
-
-    conc = m.get("z_hat_concentration")
-    if conc is not None and not np.isnan(conc):
-        if conc < 0.01:
-            failed.append(
-                f"COLLAPSE: predictor emits ~one vector for every masked token "
-                f"(std/norm={conc:.3g} < 0.01)")
-        else:
-            notes.append(f"predictor varies across tokens (std/norm={conc:.3g})")
-
-    sr = m.get("scale_ratio_zh_zy")
-    if sr is not None and not np.isnan(sr):
-        if not (0.5 <= sr <= 2.0):
-            failed.append(
-                f"SCALE MISMATCH: ||z_hat||/||z_y||={sr:.3g} — invisible to a "
-                f"cosine-only loss, so L_total is not evidence of learning")
-        else:
-            notes.append(f"prediction/target magnitudes agree (ratio={sr:.3g})")
-
-    rmse = m.get("raw_mse")
-    if rmse is not None and not np.isnan(rmse) and rmse > 1.0:
-        notes.append(f"raw_mse={rmse:.4g} (absolute latent error)")
-
-    jr = m.get("joint_target_delta_rel")
-    if jr is not None and not np.isnan(jr):
-        if jr > 1.0:
-            failed.append(
-                f"FUSION DOMINATES: ||Z_joint - Z_geo|| / ||Z_geo|| = {jr:.3g} "
-                f"> 1 — the target is no longer geometry-anchored")
-        else:
-            notes.append(f"fusion is a bounded perturbation of Z_geo ({jr:.3g})")
-
-    s = m.get("target_spec_sensitivity_normalized")
-    if s is not None and not np.isnan(s):
-        # 1% of the target norm is the smallest coupling that can plausibly
-        # steer an inverse-design search.
-        if s < 0.01:
-            failed.append(
-                f"GOAL DEAD: shuffling the goal spectrum moves the target by "
-                f"{s:.3g} of its norm (< 1%) — conditioning is not usable")
-        else:
-            notes.append(f"goal coupling ACTIVE (norm sensitivity={s:.3g})")
-
-    g = m.get("joint_gate_tanh")
-    if g is not None:
-        notes.append(f"fusion gate tanh={g:.4g} "
-                     f"({'open' if abs(g) > 1e-3 else 'closed at init'})")
-
+    failed, notes = verdict_from_metrics(m)
     print("\nVERDICT:", "FAIL" if failed else "PASS")
     for n in failed:
         print("  [x]", n)

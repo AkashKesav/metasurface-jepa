@@ -455,6 +455,10 @@ def validate(model, objective, val_batches, cfg, device):
     metrics = {
         "raw_mse": [], "raw_cos_err": [], "raw_z_hat_norm": [],
         "raw_z_y_norm": [],
+        # collapse / scale health (see the RAW diagnostics block below)
+        "raw_z_hat_std_dim": [], "raw_z_y_std_dim": [],
+        "scale_ratio_zh_zy": [], "raw_z_y_geo_norm": [],
+        "joint_target_delta_rel": [],
         "proj_mse": [], "proj_cos_err": [], "proj_p_hat_norm": [],
         "proj_p_y_norm": [],
         "L_total": [], "L_inv": [], "L_var": [], "L_cov": [],
@@ -501,6 +505,29 @@ def validate(model, objective, val_batches, cfg, device):
                     float(z_hat_m.norm(dim=-1).mean()))
                 metrics["raw_z_y_norm"].append(
                     float(z_y_m.norm(dim=-1).mean()))
+
+                # --- collapse / scale diagnostics (§11, added after the
+                # Stage-A run collapsed while L_total read ~1e-5) ---
+                # raw_mse vs L_total disagreeing by orders of magnitude is the
+                # signature of "direction matched, magnitude ignored"; these
+                # three numbers make it visible during training instead of
+                # only in a post-mortem.
+                metrics["raw_z_hat_std_dim"].append(
+                    float(z_hat_m.float().std(dim=0).mean()))
+                metrics["raw_z_y_std_dim"].append(
+                    float(z_y_m.float().std(dim=0).mean()))
+                zy_norm_f = float(z_y_m.norm(dim=-1).mean())
+                if zy_norm_f > 0:
+                    metrics["scale_ratio_zh_zy"].append(
+                        float(z_hat_m.norm(dim=-1).mean()) / zy_norm_f)
+                if "z_y_joint" in out and "z_y_raw" in out:
+                    geo_m = out["z_y_raw"][mask_bool]
+                    geo_norm = float(geo_m.norm(dim=-1).mean())
+                    metrics["raw_z_y_geo_norm"].append(geo_norm)
+                    if geo_norm > 0:
+                        delta = float((z_y_m - geo_m).norm(dim=-1).mean())
+                        metrics["joint_target_delta_rel"].append(
+                            delta / geo_norm)
 
                 # --- PROJECTED latent space diagnostics (same tokens) ---
                 # p_hat/p_y are exactly the tensors L_inv uses.
