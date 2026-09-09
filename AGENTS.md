@@ -88,6 +88,26 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
       `scripts/preflight/checkpoint_integrity_check.py`, `scripts/preflight/repo_static_audit.py`.
       Updated `CLOUD_TRAINING.md`, `notebooks/cloud_train_runner.ipynb`, `requirements.txt`
       (PyTorch 2.5.1 + Torchvision 0.20.1). All Phase-1 tests pass (292 passed, 7 skipped).
+    - **2026-09-08 — Goal-fix plan (direct goal route + ranking terms) DISABLED; superseded
+      by the Joint Target Redesign.** The operator retired
+      `docs/UNIFIED_ARCHITECTURE_FIX_GOAL.md` in full — its audit conclusion's remedy
+      (direct goal route), required comparisons, acceptance gates, Stage A/B/C execution
+      order, and the ranking-terms addition (`L_goal_shuffled`/`L_goal_null`) are all
+      disabled and retained for provenance only. It is superseded by
+      `docs/JOINT_TARGET_REDESIGN.md` (adopted same date), which changes the JEPA target
+      itself to `Z_joint = J(Z_G, Z_S)` (geometry↔spectrum cross-attention with a
+      zero-initialized tanh gate) instead of bolting goal routes onto a geometry-only
+      target. The associated code paths (`direct_goal_route` config flag,
+      `--lambda-goal`/`--goal-margin` in `scripts/eval/stage4_goal_utility.py`) were already
+      off by default and remain disabled pending an explicit removal decision. Rationale:
+      a geometry-only EMA target can only *reward* spectrum use, never *require* it
+      (`docs/UNIFIED_ORIGINAL_ARCHITECTURE.md` §14; `docs/implementation/unified_jepa/
+      architecture_v5.md` §0.2) — four goal-conditioning attempts on that target failed or
+      were rejected, so the target itself must change. Per Standing Rule 1, work on the
+      redesign proceeds stage by stage (`JOINT_TARGET_REDESIGN.md` §9: A joint target →
+      B decoder → C physics → D conditionality → E hard masking → F zero-context →
+      G stochasticity); no mechanism from §13 ("do not add yet") may be implemented without
+      a measured failure motivating it.
 
 ---
 

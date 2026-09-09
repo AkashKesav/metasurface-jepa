@@ -1,0 +1,121 @@
+# Unified JEPA — Joint Target Redesign, Stage A (JEPA-only training)
+# docs/JOINT_TARGET_REDESIGN.md §9 Stage A, §14 step 4.
+#
+# Stage A scope (§9 table):
+#   50% block mask, scalars all known, S_goal = S_true
+#   active loss term: L_JEPA only (raw-latent normalized MSE on masked tokens)
+#
+# The JEPA target is Z_joint = J(Z_G, Z_S) (§3): geometry EMA latent + gated
+# spectrum cross-attention. The student predicts ONLY masked spatial tokens via
+# MaskedQueryPredictor (§4); visible positions keep the context representation.
+#
+# L_JEPA = lambda_raw * MSE(normalize(z_hat[mask]), normalize(z_y_joint[mask]))
+# — a cosine-equivalent loss on the RAW latent (§7.1: "normalized Huber or
+# cosine initially"; §11: report raw vs projected — projector-absorption risk).
+# All projected VICReg terms (L_inv/L_var/L_cov), L_occ, L_scalar, L_phys are
+# disabled (weight 0); they activate in Stages B–D.
+#
+# This config is a fork of configs/unified.yaml; the only changes are the
+# Joint-Target flags, the Stage-A curriculum (single 50% mask, scalars all
+# known), the L_JEPA-only loss weights, and no goal dropout.
+
+scalar_convention:
+  parameter_order: ["l_lattice", "h_atom", "r_atom"]
+  parameter_index_in_dataset: [0, 1, 2]
+  broadcast_channel:
+    l_lattice: {channel: 2, divisor: 3.0, dense: true}
+    h_atom: {channel: 1, divisor: 1.0, dense: false}
+    r_atom: {channel: 0, divisor: 5.0, dense: false}
+  factorized_scalar_representation: raw physical values (not rescaled)
+
+scalar_bounds:
+  l_lattice: [2.5, 3.0]
+  h_atom: [0.5, 1.0]
+  r_atom: [3.5, 5.0]
+
+variant: unified
+
+# Distinct checkpoint subdir so Stage-A artifacts never collide with the
+# old unified line's checkpoints/unified/ checkpoints.
+checkpoint_subdir: unified_stage_a
+
+# --- Joint Target Redesign flags (docs/JOINT_TARGET_REDESIGN.md) ---
+# joint_target: teacher target = Z_joint = J(Z_G, Z_S) (§3)
+# predictor_type: masked_query — student predicts masked tokens only (§4)
+# mq_predictor_layers: MaskedQueryPredictor (self+cross+FFN) block count
+joint_target: true
+predictor_type: masked_query
+mq_predictor_layers: 2
+
+hidden: 192
+num_heads: 6
+geo_depth: 6
+predictor_depth: 8          # unused on masked_query path; kept for state-dict parity
+goal_tokens: 16
+num_predictor_heads: 6
+scalar_hidden: 128
+n_film_blocks: 6
+spec_dim: 256
+ema_momentum_start: 0.996
+ema_momentum_end: 0.999
+
+# Loss weights — Stage A: L_JEPA only (§7.1, §9).
+# L_JEPA is the raw-latent normalized MSE path (objective's L_raw term): a
+# cosine-equivalent distance on the masked-token latents. All other terms
+# (projected VICReg invariance/variance/covariance, occupancy BCE, scalar L1,
+# physics) are disabled — they activate in Stages B–D per §9.
+loss:
+  lambda_inv: 0.0       # projected-space VICReg invariance — OFF (Stage A)
+  lambda_var: 0.0       # VICReg variance — OFF
+  lambda_cov: 0.0       # VICReg covariance — OFF
+  lambda_scalar: 0.0   # scalar L1 — OFF (scalars all known in Stage A)
+  lambda_occ: 0.0       # occupancy BCE — OFF (Stage B)
+  lambda_phys: 0.0      # physics surrogate — OFF (Stage C)
+  lambda_raw: 1.0       # L_JEPA: raw-latent normalized MSE on masked tokens (§7.1)
+  gamma: 1.0
+  eps: 1.0e-4
+
+# Mask curriculum — Stage A: single 50% block mask, scalars all known (§9).
+curriculum:
+  train_mask_ratios: [0.5]
+  train_mask_ratio_probs: [1.0]
+  eval_mask_ratios: [0.0, 0.5, 1.0]   # easy / stage-A / full-mask diagnostic
+  mask_placement: random
+  scalar_regimes: ["all_known"]
+  scalar_regime_probs: [1.0]
+  easy_mask_ratio: 0.0
+  hard_mask_ratio: 1.0
+
+staging:
+  phase: B
+  lambda_phys_ramp_steps: 0
+  physics_use_ste: true
+
+weights:
+  spectrum: data/metadit/weights/spec_encoder.pth
+  metadit: data/metadit/weights/metadit-small.bin
+  surrogate: data/metadit/weights/surrogate_model.bin
+
+data:
+  train_split: data/metadit/split_data/train_set.mat
+  val_split: data/metadit/split_data/val_set.mat
+  max_train_samples: 0
+  num_workers: 0
+  use_synthetic: false
+
+train:
+  batch_size: 2
+  grad_accum: 1
+  epochs: 1
+  lr: 3.0e-4
+  wd: 1.0e-4
+  warmup_steps: 100
+  total_steps: 1500
+  val_every_steps: 50
+  log_every_steps: 10
+  ckpt_every_steps: 100
+  clip_grad_norm: 1.0
+  seed: 42
+  val_batches: 2          # need B>=2 for the shuffled-spectrum control diagnostic
+  device: cuda           # cloud (Kaggle); local smoke overrides to cpu
+  guidance_dropout: 0.0  # Stage A: S_goal = S_true always (no null-goal mixing)

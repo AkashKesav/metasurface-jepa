@@ -1,0 +1,11 @@
+{
+  "id": "akashkesav/metasurface-jepa-repaired-baseline-physics",
+  "title": "Metasurface JEPA repaired baseline physics",
+  "code_file": "run_compare.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["akashkesav/metadit-aaai2026-staging"]
+}

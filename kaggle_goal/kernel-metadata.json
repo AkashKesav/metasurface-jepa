@@ -1,0 +1,11 @@
+{
+  "id": "anosvol/metasurface-jepa-goal-margin-selected-v2",
+  "title": "Metasurface JEPA goal margin selected v2",
+  "code_file": "run_goal.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["anosvol/metadit-aaai2026-staging"]
+}

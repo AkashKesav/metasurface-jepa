@@ -111,9 +111,14 @@ class DirectMaskedGenerator(_JEPAForwardMixin, nn.Module):
         self.geometry_encoder = geo
 
     def forward(self, G, S, M, goal_mode="real", need_attn=False):
-        _, delta, z_x, mask, weights = self._encode(G, S, M, goal_mode, need_attn)
-        g_hat = unpatchify(delta)
-        return dict(g_hat=g_hat, z_latent=delta, mask=mask, attn_weights=weights)
+        # _JEPAForwardMixin._encode returns
+        # (z_hat, z_x, mask, weights, c_physics, a_goal); for this baseline the
+        # predictor is the pixel-headed _ReferencePixelGCLCT, so z_hat IS the
+        # predicted pixel-token map (B, 256, 3*patch^2).
+        z_hat, z_x, mask, weights, c_physics, a_goal = self._encode(
+            G, S, M, goal_mode, need_attn)
+        g_hat = unpatchify(z_hat)
+        return dict(g_hat=g_hat, z_latent=z_hat, mask=mask, attn_weights=weights)
 
     def loss(self, G, S, M, goal_mode="real"):
         out = self.forward(G, S, M, goal_mode=goal_mode)

@@ -22,9 +22,20 @@ class ScalarDecoder(nn.Module):
     to produce a non-trivial Jacobian (Phase 4 MD §3: "NO zero-init on this one").
     """
 
-    def __init__(self, hidden=192, mlp_hidden=64, n_scalars=3):
+    def __init__(self, hidden=192, mlp_hidden=64, n_scalars=3,
+                 bounds=None):
         super().__init__()
         self.n_scalars = n_scalars
+        if bounds is None:
+            bounds = ((2.5, 3.0), (0.5, 1.0), (3.5, 5.0))
+        if len(bounds) != n_scalars:
+            raise ValueError("scalar bounds must contain one (lo, hi) pair per scalar")
+        bounds = torch.as_tensor(bounds, dtype=torch.float32)
+        if bounds.shape != (n_scalars, 2) or not torch.isfinite(bounds).all():
+            raise ValueError("scalar bounds must have finite shape [n_scalars, 2]")
+        if not torch.all(bounds[:, 1] > bounds[:, 0]):
+            raise ValueError("each scalar bound must satisfy hi > lo")
+        self.register_buffer("bounds", bounds)
         self.heads = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(hidden, mlp_hidden),
@@ -45,7 +56,7 @@ class ScalarDecoder(nn.Module):
 
     def forward(self, scalar_summary_pred):
         """scalar_summary_pred: (B, hidden) → scalars: (B, n_scalars)."""
-        return torch.stack(
-            [head(scalar_summary_pred).squeeze(-1) for head in self.heads],
-            dim=-1,
-        )
+        raw = torch.stack(
+            [head(scalar_summary_pred).squeeze(-1) for head in self.heads], dim=-1)
+        lo, hi = self.bounds[:, 0], self.bounds[:, 1]
+        return lo + (hi - lo) * torch.sigmoid(raw)

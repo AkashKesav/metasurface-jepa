@@ -36,6 +36,7 @@ from losses.unified_losses import (
     OccupancyTokenLoss,
     ScalarPredictionLoss,
     PhysicsSpectrumLoss,
+    occupancy_reconstruction_loss,
 )
 from data.mask import BlockMasker
 
@@ -106,10 +107,88 @@ def test_loss_components_finite():
     sk = torch.tensor([[True, False, True], [False, True, False]])
     result = objective(model, occ, sv, sk, spec, M)
     c = result["components"]
-    for k in ("L_inv", "L_var", "L_cov", "L_scalar", "L_phys",
+    for k in ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys",
               "L_inv_weighted", "L_var_weighted", "L_cov_weighted", "L_total"):
         assert k in c, f"missing component {k}"
         assert c[k] >= 0, f"{k} negative: {c[k]}"
+
+
+def test_occupancy_reconstruction_loss_supports_partial_and_full_masks():
+    logits = torch.zeros(2, 1, 8, 8, requires_grad=True)
+    target = torch.zeros(2, 1, 8, 8)
+    target[:, :, 4:, 4:] = 1.0
+
+    visible = torch.ones(2, 2, 2)
+    visible[:, 1:, 1:] = 0.0
+    partial = occupancy_reconstruction_loss(logits, target, visible)
+    assert torch.isfinite(partial)
+    partial.backward()
+    assert logits.grad is not None
+
+    full = occupancy_reconstruction_loss(
+        logits.detach().requires_grad_(True), target, torch.zeros_like(visible))
+    assert torch.isfinite(full)
+
+    unmasked = occupancy_reconstruction_loss(
+        logits.detach().requires_grad_(True), target, torch.ones_like(visible))
+    assert torch.isfinite(unmasked)
+
+
+def test_lambda_occ_trains_occupancy_decoder_when_physics_is_disabled():
+    model = _build_model()
+    objective = UnifiedJEPALoss(
+        hidden=192, lambda_inv=0.0, lambda_var=0.0, lambda_cov=0.0,
+        lambda_scalar=0.0, lambda_occ=1.0, lambda_phys=0.0,
+    )
+    occ, sv, spec, M = _batch(seed=17)
+    result = objective(model, occ, sv, torch.zeros(2, 3, dtype=torch.bool),
+                       spec, M)
+    assert result["components"]["L_occ"] > 0
+    assert result["components"]["L_phys"] == 0.0
+    result["total_loss"].backward()
+
+    grads = [p.grad for p in model.geometry_decoder.parameters()
+             if p.requires_grad]
+    assert grads and any(g is not None and g.abs().sum() > 0 for g in grads)
+
+
+class _TinyPhysicsSurrogate(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0), requires_grad=False)
+
+    def forward(self, geometry):
+        class Result:
+            pass
+        result = Result()
+        result.prediction = geometry.mean(dim=(1, 2, 3), keepdim=False)
+        result.prediction = result.prediction[:, None, None].expand(-1, 2, 301)
+        return result
+
+
+def test_physics_path_is_independent_of_model_eval_mode():
+    model = _build_model()
+    surrogate = _TinyPhysicsSurrogate()
+    objective = UnifiedJEPALoss(
+        hidden=192, lambda_inv=0.0, lambda_var=0.0, lambda_cov=0.0,
+        lambda_scalar=0.0, lambda_occ=0.0, lambda_phys=1.0,
+        surrogate=surrogate,
+    )
+    occ, sv, spec, M = _batch(seed=18)
+    sk = torch.zeros(2, 3, dtype=torch.bool)
+
+    model.eval()
+    objective.eval()
+    evaluated = objective(
+        model, occ, sv, sk, spec, M, compute_physics=True)
+    assert evaluated["out"]["physics_computed"]
+    assert evaluated["components"]["L_phys"] > 0
+    assert all(p.grad is None for p in surrogate.parameters())
+
+    skipped = objective(
+        model, occ, sv, sk, spec, M, compute_physics=False)
+    assert not skipped["out"]["physics_computed"]
+    assert skipped["components"]["L_phys"] == 0.0
 
 
 def test_loss_backward_student_grads_exist():

@@ -161,7 +161,19 @@ def _pooled_pred_stats(Z_pooled):
     """Z_pooled: (B, D) mean-pooled masked predictions -> projection-space stats.
 
     n < 2: NaN markers (Bug #21) — the stats are undefined and the raw-side
-    n_geoms guard in classify_health produces the UNAVAILABLE verdict."""
+    n_geoms guard in classify_health produces the UNAVAILABLE verdict.
+
+    n < 3 (provable-degeneracy guard, 2026-09-08): centering a B-row matrix
+    leaves rank <= B-1, so for B <= 2 exp(H) is floored at 1.0 and
+    eff_rank_frac at 1/min(B,D) REGARDLESS of the data — a data-blind value
+    that read as a stable collapse monitor for an entire September sweep
+    (pred_eff_rank_frac = 0.5000000; root-caused in the 2026-09-08 training-path
+    audit). eff_ranks now refuses B < 3 with NaN itself, so this branch is
+    reached only via the n < 2 fast path; the n == 2 case is caught inside
+    eff_ranks. Pooled prediction stats remain meaningful only when B is at
+    least a few validation samples — for the B == 2 (small-val-set) failure
+    mode the gauge now emits NaN (UNAVAILABLE) instead of a fake 0.5.
+    """
     if Z_pooled.shape[0] < 2:
         return {"mean_std": float("nan"),
                 "pairwise_cos": {"mean": float("nan"), "median": float("nan"),

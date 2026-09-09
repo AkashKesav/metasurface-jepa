@@ -5,6 +5,8 @@ All first-party training/evaluation code must use these utilities.
 """
 
 import random
+from contextlib import contextmanager
+
 import numpy as np
 import torch
 
@@ -64,15 +66,19 @@ def restore_rng_state(state: dict) -> None:
         torch.cuda.set_rng_state_all(cuda)
 
 
+@contextmanager
 def fork_rng(seed: int | None = None, devices=None):
     """Context manager for isolated RNG fork (like torch.random.fork_rng).
 
     Args:
-        seed: If provided, manual_seed(seed) is called inside the fork.
+        seed: If provided, manual_seed(seed) is called inside the fork
+              (torch + CUDA when available), so the forked block draws from a
+              deterministic stream while the ambient RNG state is restored
+              untouched on exit.
         devices: CUDA devices to fork (default: current device only).
 
-    Returns:
-        Context manager that restores RNG state on exit.
+    Yields:
+        None. RNG state is restored on exit.
     """
     if devices is None:
         devices = (
@@ -81,10 +87,12 @@ def fork_rng(seed: int | None = None, devices=None):
             else []
         )
 
-    return torch.random.fork_rng(
-        devices=devices,
-        enabled=True,
-    )
+    with torch.random.fork_rng(devices=devices, enabled=True):
+        if seed is not None:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+        yield
 
 
 def deterministic_reference_build(build_fn, seed: int = 2026):

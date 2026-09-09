@@ -40,6 +40,9 @@ from encoders.spectrum_encoder import ReleasedSpectrumEncoder, SpectrumPath
 from encoders.target_encoder import EMAEncoder
 from losses.jepa_loss import jepa_loss
 from predictor.gclct import GCLCT
+from predictor.joint_target_fusion import JointTargetFusion
+from predictor.masked_query_predictor import MaskedQueryPredictor
+# goal_residual route RETIRED 2026-09-08 (Joint Target Redesign supersedes it).
 
 PIXEL_GRID = 16  # 64 / patch_size 4
 
@@ -343,10 +346,24 @@ class UnifiedJEPA(nn.Module):
     Internal flow (§11.1):
         occupancy + masked scalars + FiLM → OccupancyEncoder → z_x [B,256,192]
         spectrum → SpectrumPath(frozen) → c_physics [B,384], a_goal [B,16,384]
+
+    GCLCT branch (legacy, predictor_type="gclct"):
         z_x + proj(a_goal) + scalar_summary → FusionEncoder → fused [B,273,192]
         256 mask-token queries + 1 scalar-summary query → GCLCT(c_physics)
         → z_hat [B,257,192] → occupancy_pred + scalar_summary_pred → scalar_pred
         EMA target encoder (occupancy_ema + scalar_mlp_ema) → z_y_raw [B,256,192]
+
+    Joint Target Redesign branch (docs/JOINT_TARGET_REDESIGN.md, adopted
+    2026-09-08; predictor_type="masked_query" / joint_target=True):
+        visible z_x tokens + goal_proj(a_goal) [B,16,192] + scalar summary
+        → MaskedQueryPredictor → z_hat [B,256,192] (predicted at masked
+        positions only; visible positions keep the context representation, §4)
+        teacher: EMA(occupancy) → z_y_geo [B,256,192] (stop-grad) and
+        Z_S = goal_proj(a_goal) (stop-grad) → JointTargetFusion
+        → z_y_joint = Z_G + tanh(gate)·cross_attn(Z_G, Z_S)   (§3)
+        The fusion's gate/attention parameters ARE trainable — the objective
+        gradient reaches them through z_y_joint; everything upstream of the
+        fusion is frozen/detached (EMA geometry, released spectrum encoder).
 
     EMA rules (§3.6):
         - occupancy EMA = JEPA target for occupancy tokens only
@@ -358,13 +375,32 @@ class UnifiedJEPA(nn.Module):
 
     def __init__(self, hidden=192, num_heads=6, geo_depth=6, predictor_depth=8,
                  goal_tokens=16, num_predictor_heads=6, scalar_hidden=128,
-                 n_film_blocks=6, spec_dim=256,
-                 momentum_start=0.996, momentum_end=0.999):
+                 n_film_blocks=6, spec_dim=256, scalar_bounds=None,
+                 momentum_start=0.996, momentum_end=0.999,
+                 joint_target=False, predictor_type="gclct",
+                 mq_predictor_layers=2):
         super().__init__()
         self.hidden = hidden
         self.num_heads = num_heads
         self.goal_tokens = goal_tokens
-        self.architecture_id = UNIFIED_ARCHITECTURE_ID
+
+        # --- Joint Target Redesign switches (docs/JOINT_TARGET_REDESIGN.md) ---
+        # joint_target=True            : teacher target becomes Z_joint (§3)
+        # predictor_type="masked_query": student predicts masked tokens only (§4)
+        # Defaults keep the pre-redesign GCLCT architecture bit-for-bit.
+        self.joint_target = bool(joint_target)
+        if predictor_type not in ("gclct", "masked_query"):
+            raise ValueError(
+                f"predictor_type must be 'gclct' or 'masked_query', "
+                f"got {predictor_type!r}")
+        self.predictor_type = predictor_type
+        suffix = []
+        if joint_target:
+            suffix.append("joint")
+        if predictor_type == "masked_query":
+            suffix.append("mq")
+        self.architecture_id = UNIFIED_ARCHITECTURE_ID + (
+            "_" + "-".join(suffix) if suffix else "")
 
         # Student encoders
         self.occupancy_encoder = OccupancyEncoder(
@@ -380,19 +416,44 @@ class UnifiedJEPA(nn.Module):
             num_heads=4,
         )
 
-        # Fusion (192-D, projects a_goal 384→192 internally)
-        self.fusion_encoder = FusionEncoder(
-            hidden=hidden, num_heads=num_heads, depth=2, goal_dim_in=384
-        )
+        if predictor_type == "masked_query" or joint_target:
+            # Shared 384→192 goal projection (§2: "Project a_goal to 192-D
+            # for the joint predictor"). One projection serves both the
+            # student predictor's KV and the teacher fusion's KV, so Z_S is
+            # the same representation on both sides of the JEPA objective.
+            self.goal_proj = nn.Linear(384, hidden)
 
-        # Predictor — accepts 384-D c_physics, projects to 192 internally
-        self.predictor = GCLCT(
-            depth=predictor_depth, hidden=hidden, num_heads=num_predictor_heads,
-            c_physics_dim=384,
-        )
+        if predictor_type == "masked_query":
+            # §4 student predictor: masked queries only. The GCLCT path
+            # (fusion_encoder + GCLCT predictor) is NOT constructed — the two
+            # are alternative predictors, not complements.
+            self.masked_query_predictor = MaskedQueryPredictor(
+                hidden=hidden, num_heads=num_predictor_heads,
+                num_layers=mq_predictor_layers, n_spatial_tokens=256)
+        else:
+            # Fusion (192-D, projects a_goal 384→192 internally)
+            self.fusion_encoder = FusionEncoder(
+                hidden=hidden, num_heads=num_heads, depth=2, goal_dim_in=384
+            )
+
+            # Predictor — accepts 384-D c_physics, projects to 192 internally
+            self.predictor = GCLCT(
+                depth=predictor_depth, hidden=hidden, num_heads=num_predictor_heads,
+                c_physics_dim=384,
+            )
+        # goal_residual route RETIRED 2026-09-08.
+
+        if joint_target:
+            # §3 joint target fusion: Z_joint = Z_G + tanh(gate) * cross_attn(
+            # Q=Z_G, KV=Z_S), gate zero-init (bit-identical to the geometry-
+            # only target at step 0). NOT EMA-copied — its gate/attention
+            # parameters are trained directly by the objective gradient that
+            # flows through z_y_joint; everything upstream is detached.
+            self.joint_target_fusion = JointTargetFusion(
+                hidden=hidden, num_heads=num_heads)
 
         # Scalar decode heads
-        self.scalar_decoder = ScalarDecoder(hidden=hidden)
+        self.scalar_decoder = ScalarDecoder(hidden=hidden, bounds=scalar_bounds)
 
         # Occupancy decoder: latent → occupancy logits only, FiLM-conditioned
         # by effective (l,h,r) at every layer (architecture_v5.md §4.1).
@@ -434,6 +495,16 @@ class UnifiedJEPA(nn.Module):
         self.ema.set_total_steps(n)
         self.scalar_mlp_ema.set_total_steps(n)
 
+    @property
+    def requires_broadcast_mask(self):
+        """MaskedQueryPredictor (Stage A) operates on a single mask shape
+        broadcast across the batch (§4; per-sample masks arrive with Stage F).
+        Mask samplers must honor this and produce identical masked positions
+        for every sample in the batch — BlockMasker.sample draws per-sample
+        placements by default, so callers route through batch-1 sampling +
+        broadcast when this flag is set."""
+        return self.predictor_type == "masked_query"
+
     def enforce_frozen_reference_modes(self):
         """Keep frozen reference modules in eval() regardless of student mode."""
         self.ema.target.eval()
@@ -471,7 +542,13 @@ class UnifiedJEPA(nn.Module):
             scalar_known:   [B,3] bool — which scalars are observed.
             spectrum:       [B,2,301] target spectrum.
             mask:           [B,16,16]  1=visible, 0=masked.
-            goal_mode:      "real" | "null" | "shuffled"
+            goal_mode:      "real" | "null" (only). "shuffled" is NOT a model
+                            goal_mode — SpectrumPath treats any non-"null"
+                            value as "real" and validate_goal_mode rejects
+                            it; shuffled controls are built externally by
+                            deranging the spectrum tensor
+                            (runtime.physics_controls.make_shuffled_spectrum)
+                            and then run with goal_mode="real".
             with_target:    compute EMA target latent z_y_raw.
             need_attn:      return attention weights.
 
@@ -499,29 +576,53 @@ class UnifiedJEPA(nn.Module):
         c_physics, a_goal = self.spectrum_path(spectrum, goal_mode=goal_mode)
         # c_physics: (B, 384), a_goal: (B, 16, 384)
 
-        # 5. Fusion: 256 occupancy + 16 goal (projected 384→192) + 1 scalar summary
-        fused = self.fusion_encoder(z_x, a_goal, scalar_summary)  # (B, 273, hidden)
-        assert fused.shape[1] == 273, (
-            f"Fusion must output 273 tokens (256+16+1), got {fused.shape[1]}"
-        )
-
-        # 6. Construct predictor queries
-        pos = self.occupancy_encoder.pos_embed  # (1, 256, hidden)
+        # 5-8. Student prediction (predictor branch)
         vis_mask = (mask.view(b, -1) > 0.5)  # True = visible, (B, 256)
-        occ_queries = torch.where(
-            vis_mask.unsqueeze(-1),
-            fused[:, :256, :],          # visible: fused tokens
-            self.mask_token + pos,      # masked: mask_token + pos
-        )  # (B, 256, hidden)
-        scalar_query = self.scalar_query_token.expand(b, -1, -1)  # (B, 1, hidden)
-        queries = torch.cat([occ_queries, scalar_query], dim=1)    # (B, 257, hidden)
+        if self.predictor_type == "masked_query":
+            # §4: only masked spatial tokens are predicted; visible positions
+            # keep the context representation unchanged (first-implementation
+            # choice per the spec). The Stage-A contract requires a single
+            # mask shape across the batch (see requires_broadcast_mask).
+            n_masked = int((~vis_mask[0]).sum().item())
+            if n_masked == 0:
+                # Nothing to predict — the full grid is visible context.
+                occupancy_pred = z_x
+            else:
+                visible_idx = vis_mask[0].nonzero(as_tuple=False).squeeze(-1)
+                z_visible = z_x[:, visible_idx, :]        # (B, N_vis, hidden)
+                a_goal_h = self.goal_proj(a_goal)         # (B, 16, hidden)
+                c_scalar = scalar_summary.squeeze(1)      # (B, hidden)
+                occupancy_pred = self.masked_query_predictor(
+                    z_visible, a_goal_h, vis_mask, c_scalar)  # (B, 256, hidden)
+            # Stage-A scalar path: this branch has no predictor scalar-query
+            # (a context-attending scalar query is a §14-step-5 / Stage-B
+            # concern). Decode from the scalar encoder's summary token so the
+            # output contract holds; under the Stage-A curriculum (scalars
+            # all known) this head is neither trained nor consumed.
+            scalar_summary_pred = scalar_summary.squeeze(1)  # (B, hidden)
+        else:
+            # 5. Fusion: 256 occupancy + 16 goal (projected 384→192) + 1 scalar summary
+            fused = self.fusion_encoder(z_x, a_goal, scalar_summary)  # (B, 273, hidden)
+            assert fused.shape[1] == 273, (
+                f"Fusion must output 273 tokens (256+16+1), got {fused.shape[1]}"
+            )
 
-        # 7. Predictor (c_physics 384→192 via c_phys_proj)
-        z_hat_raw, _ = self.predictor(queries, fused, c_physics)  # (B, 257, hidden)
+            # 6. Construct predictor queries
+            pos = self.occupancy_encoder.pos_embed  # (1, 256, hidden)
+            occ_queries = torch.where(
+                vis_mask.unsqueeze(-1),
+                fused[:, :256, :],          # visible: fused tokens
+                self.mask_token + pos,      # masked: mask_token + pos
+            )  # (B, 256, hidden)
+            scalar_query = self.scalar_query_token.expand(b, -1, -1)  # (B, 1, hidden)
+            queries = torch.cat([occ_queries, scalar_query], dim=1)    # (B, 257, hidden)
 
-        # 8. Split predictions
-        occupancy_pred = z_hat_raw[:, :256, :]         # (B, 256, hidden)
-        scalar_summary_pred = z_hat_raw[:, 256, :]     # (B, hidden)
+            # 7. Predictor (c_physics 384→192 via c_phys_proj)
+            z_hat_base, _ = self.predictor(queries, fused, c_physics)  # (B, 257, hidden)
+
+            # 8. Split predictions
+            occupancy_pred = z_hat_base[:, :256, :]      # (B, 256, hidden)
+            scalar_summary_pred = z_hat_base[:, 256, :]   # (B, hidden)
 
         # 9. Scalar decode
         scalar_pred = self.scalar_decoder(scalar_summary_pred)  # (B, 3)
@@ -531,6 +632,7 @@ class UnifiedJEPA(nn.Module):
 
         out = dict(
             z_hat=occupancy_pred,
+            z_hat_base=occupancy_pred,
             z_x=z_x,
             mask=loss_mask,
             c_physics=c_physics,
@@ -538,6 +640,15 @@ class UnifiedJEPA(nn.Module):
             scalar_pred=scalar_pred,
             scalar_summary_pred=scalar_summary_pred,
         )
+
+        # Decode occupancy once here so the active objective can supervise it
+        # directly. The physics loop reuses these logits when available,
+        # avoiding a second occupancy-decoder forward for the same prediction.
+        effective_scalars = torch.where(
+            scalar_known, scalar_values, scalar_pred)
+        out["occupancy_logits"] = self.geometry_decoder(
+            occupancy_pred, effective_scalars)
+        out["effective_scalars"] = effective_scalars
 
         if with_target:
             with torch.no_grad():
@@ -548,18 +659,32 @@ class UnifiedJEPA(nn.Module):
                     scalar_values[:, 2], torch.ones_like(scalar_values[:, 2]),
                 ], dim=-1)  # (B, 6)
                 film_params_ema, _ = self.scalar_mlp_ema(true_input)
-                z_y_raw = self.ema(occupancy, film_params=film_params_ema)
-                out["z_y_raw"] = z_y_raw
+                z_y_geo = self.ema(occupancy, film_params=film_params_ema)
+                out["z_y_raw"] = z_y_geo
                 out["z_y_normalized"] = F.layer_norm(
-                    z_y_raw, (z_y_raw.shape[-1],)
+                    z_y_geo, (z_y_geo.shape[-1],)
                 )
-                out["z_y"] = z_y_raw  # compat alias
+                out["z_y"] = z_y_geo  # compat alias
+
+            if self.joint_target:
+                # §3 joint target: Z_joint = J(Z_G, Z_S). z_y_geo (EMA
+                # geometry) and a_s (released spectrum encoder, detached) are
+                # both stop-gradient — the ONLY trainable parameters receiving
+                # the objective's target-side gradient are the fusion's own
+                # gate/attention weights (plus the shared goal_proj), which is
+                # exactly how the teacher learns a physics-conditioned
+                # representation. NOTE: the joint target is meaningful for
+                # goal_mode="real" (Stage-A contract S_goal = S_true); a null
+                # goal zeroes Z_S and the fusion degenerates to a constant,
+                # spectrum-free delta.
+                a_s = self.goal_proj(a_goal.detach())  # (B, 16, hidden)
+                out["z_y_joint"] = self.joint_target_fusion(z_y_geo, a_s)
 
         return out
 
     def decode_geometry(self, z_hat, scalar_pred, occ_input=None, mask=None,
                         scalar_known=None, scalar_values=None, use_ste=False,
-                        hard_forward=False):
+                        hard_forward=False, occupancy_logits=None):
         """Decode predicted latents to surrogate-ready geometry (Phase 4 MD §1-§3,
         architecture_v5.md §4.1).
 
@@ -595,8 +720,11 @@ class UnifiedJEPA(nn.Module):
         else:
             scalar_for_assembly = scalar_pred
 
-        # Decoder is FiLM-conditioned by the effective (l,h,r).
-        occ_logits = self.geometry_decoder(z_hat, scalar_for_assembly)
+        # Decoder is FiLM-conditioned by the effective (l,h,r). Reuse logits
+        # from UnifiedJEPA.forward when the caller has them.
+        if occupancy_logits is None:
+            occupancy_logits = self.geometry_decoder(z_hat, scalar_for_assembly)
+        occ_logits = occupancy_logits
         soft_occ = torch.sigmoid(occ_logits)  # (B, 1, 64, 64)
 
         if use_ste and self.training:
@@ -627,7 +755,8 @@ class UnifiedJEPA(nn.Module):
             goal_mode=goal_mode,
         )
         L_jepa, _ = jepa_loss(
-            out["z_hat"], out["z_y_raw"], out["mask"], proj=None,
+            out["z_hat"], out.get("z_y_joint", out["z_y_raw"]),
+            out["mask"], proj=None,
         )
         unknown = ~scalar_known  # (B, 3)
         scalar_err = (out["scalar_pred"] - scalar_values).abs() * unknown.float()
@@ -657,10 +786,25 @@ def build_unified_model(cfg, spec_weights, device="cpu",
         scalar_hidden=cfg.get("scalar_hidden", 128),
         n_film_blocks=cfg.get("n_film_blocks", 6),
         spec_dim=cfg.get("spec_dim", 256),
+        scalar_bounds=tuple(
+            tuple(cfg.get("scalar_bounds", {}).get(name, default))
+            for name, default in (
+                ("l_lattice", (2.5, 3.0)),
+                ("h_atom", (0.5, 1.0)),
+                ("r_atom", (3.5, 5.0)),
+            )
+        ),
     )
     kwargs.update(
         momentum_start=cfg.get("ema_momentum_start", 0.996),
         momentum_end=cfg.get("ema_momentum_end", 0.999),
+        # Joint Target Redesign (docs/JOINT_TARGET_REDESIGN.md): both default
+        # OFF so pre-redesign configs (configs/unified.yaml and everything
+        # built from it) keep the exact GCLCT architecture. The Stage-A
+        # config (configs/unified_stage_a.yaml) enables them explicitly.
+        joint_target=cfg.get("joint_target", False),
+        predictor_type=cfg.get("predictor_type", "gclct"),
+        mq_predictor_layers=cfg.get("mq_predictor_layers", 2),
     )
 
     model = UnifiedJEPA(**kwargs)

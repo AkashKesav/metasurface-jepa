@@ -1,0 +1,11 @@
+{
+  "id": "anosvol/metasurface-jepa-direct-goal-route-v3",
+  "title": "Metasurface JEPA direct goal route v3",
+  "code_file": "run_direct_goal.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["anosvol/metadit-aaai2026-staging"]
+}

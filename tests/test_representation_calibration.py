@@ -19,10 +19,17 @@ import tempfile
 
 import torch
 import numpy as np
+import pytest
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+_SPEC_WEIGHTS = os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth")
+_skip_no_spec = pytest.mark.skipif(
+    not os.path.exists(_SPEC_WEIGHTS),
+    reason="spectrum encoder weights not present (data/metadit/weights/ is "
+           "git-ignored, staged on cloud per CLOUD_TRAINING.md)")
 
 
 def test_grouped_view_is_pure_view():
@@ -103,6 +110,7 @@ def test_geometry_linear_probes_finite_and_deterministic():
         assert r1[key] == r2[key], f"{key} not deterministic"
 
 
+@_skip_no_spec
 def test_vicreg_gradient_attribution_ema_no_grads():
     """Build a tiny model + objective, run one forward/backward, verify EMA params
     have no gradients and parameter checksums unchanged."""
@@ -159,6 +167,7 @@ def test_vicreg_gradient_attribution_ema_no_grads():
     assert _cs() == cs_before, "parameters mutated during gradient attribution"
 
 
+@_skip_no_spec
 def test_vicreg_gradient_attribution_grad_norms_finite():
     from assembly import build_model
     from losses.objectives import build_objective

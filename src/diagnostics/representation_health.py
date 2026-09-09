@@ -51,7 +51,37 @@ def eff_ranks(X):
 
     NOTE (2026-08-17): previously returned the entropy H itself under the
     "eff_rank_unnorm" name, and H/log(D) under "eff_rank_frac" — both wrong scales.
+
+    CONTRACT (2026-09-08): ``eff_rank_frac`` divides by ``n = p.numel()`` — the number
+    of SVD singular values returned, which is ``min(B, D)``. For a small-batch
+    mean-pooled latent like ``(B=2, D)`` this yields only 2 singular values, so
+    ``eff_rank_frac`` is mathematically floored at 0.5 and CANNOT detect collapse.
+    Callers MUST pass a matrix with many rows (e.g. the token-level latent
+    ``z[mask]`` of shape ``(N_tokens, D)`` with ``N_tokens >> D``), never a
+    batch-mean of a 2-sample batch. Computing it on a (B=2, D) matrix silently
+    pinned a collapse monitor at 0.5 for an entire run (the September
+    ``pred_eff_rank_frac = 0.5000000`` false-stable failure, root-caused in the
+    2026-09-08 training-path audit).
+
+    PROVABLE-DEGENERACY GUARD: centering a matrix with ``B`` rows leaves rank
+    ``<= B-1``. For ``B <= 2`` the centered matrix has rank ``<= 1`` so exp(H) is
+    floored at 1.0 and eff_rank_frac at ``1 / min(B, D)`` REGARDLESS of the data —
+    a deterministic, data-blind value that reads as "stable" while measuring
+    nothing. Such inputs are refused and NaN markers returned (schema-preserving,
+    matching the existing n<2 NaN contract of pairwise_cos_stats /
+    _pooled_pred_stats; classify_health's n_geoms guard renders the resulting
+    validation UNAVAILABLE rather than misclassifying as HEALTHY). Callers that
+    genuinely need a rank gauge on a small-batch latent MUST use token_eff_ranks
+    on the flattened token population (N_tokens rows), not this pooled path.
     """
+    if X.ndim != 2:
+        raise ValueError(f"eff_ranks expects a 2-D (B, D) matrix, got {tuple(X.shape)}")
+    if X.shape[0] < 3:
+        # Provable degeneracy: centered rank <= B-1 <= 1 -> exp(H) floored, value
+        # is data-blind (see CONTRACT above). Refuse rather than emit a fake number.
+        nan = float("nan")
+        return {"eff_rank_unnorm": nan, "eff_rank_frac": nan,
+                "participation": nan, "top_eig_frac": nan}
     Xc = X - X.mean(0, keepdim=True)
     s = torch.linalg.svdvals(Xc)
     e = (s ** 2).clamp(min=0.0)
@@ -66,6 +96,33 @@ def eff_ranks(X):
     top = e.max().item() / total
     return {"eff_rank_unnorm": math.exp(ent), "eff_rank_frac": math.exp(ent) / n,
             "participation": part, "top_eig_frac": top}
+
+
+def token_eff_ranks(X):
+    """Effective-rank gauge on the TOKEN population — the CONTRACT-recommended
+    call for small-batch validation latents.
+
+    ``X`` is a token-level latent of shape ``(N_tokens, D)`` (e.g. the flattened
+    masked-token predictions ``z_hat[mask]`` of shape ``(B * N_masked, D)`` with
+    ``N_tokens >> D``), NOT a geometry-level batch-mean. Token-level inputs have
+    many rows even at validation batch B=2 (B * N_masked is typically hundreds),
+    so this gauge has real dynamic range where the pooled (B, D) path is floored
+    at 1/min(B,D) (see the eff_ranks CONTRACT). Returns keys namespaced
+    ``token_eff_rank_*`` so callers can carry both pooled and token-level gauges
+    in the same flat stats dict without collision.
+
+    Same provable-degeneracy guard as eff_ranks: ``N_tokens < 3`` is refused
+    with NaN markers (token counts below the representability floor are
+    data-blind, not a measurement).
+    """
+    if X.ndim != 2:
+        raise ValueError(f"token_eff_ranks expects a 2-D (N_tokens, D) matrix, "
+                         f"got {tuple(X.shape)}")
+    out = eff_ranks(X)
+    return {"token_eff_rank_unnorm": out["eff_rank_unnorm"],
+            "token_eff_rank_frac": out["eff_rank_frac"],
+            "token_participation": out["participation"],
+            "token_top_eig_frac": out["top_eig_frac"]}
 
 
 def pairwise_cos_stats(X_mean):
@@ -147,6 +204,16 @@ def token_space_stats(X):
         stats["pairwise_cos"] = pairwise_cos_stats(X.mean(dim=1))
         stats["same_token_cos"] = same_token_cos(X)
         stats.update(eff_ranks(X.mean(dim=1)))
+    # Token-level population gauge (CONTRACT: small-batch callers need a rank
+    # measurement with real dynamic range; the pooled (B, D) path is floored at
+    # 1/min(B,D) for small B). Flattened (N_tokens, D) so N_tokens = B * T is
+    # large even at validation batch B=2. NaN when the token count is below the
+    # representability floor (eff_ranks guard).
+    stats.update(token_eff_ranks(X.reshape(-1, X.shape[-1])) if n >= 1 else
+                 {"token_eff_rank_unnorm": float("nan"),
+                  "token_eff_rank_frac": float("nan"),
+                  "token_participation": float("nan"),
+                  "token_top_eig_frac": float("nan")})
     stats["n_geoms"] = n
     return stats
 

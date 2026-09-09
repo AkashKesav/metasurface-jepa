@@ -45,7 +45,10 @@ from data.mask import BlockMasker
 from assembly import build_unified_model, load_into_model, set_spectrum_path
 from predictor.guidance import goal_dropout
 from physics.physics_loop import load_surrogate, physics_loss
-from losses.unified_losses import UnifiedJEPALoss
+from losses.unified_losses import (
+    UnifiedJEPALoss,
+    occupancy_reconstruction_metrics,
+)
 from runtime.reproducibility import set_seed, collect_rng_state, restore_rng_state
 from runtime.device import resolve_device
 from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
@@ -243,18 +246,34 @@ class RegimeLogger:
         self.scalar_regimes = cur["scalar_regimes"]
         self.mask_counts = {r: 0 for r in self.mask_ratios}
         self.regime_counts = {r: 0 for r in self.scalar_regimes}
+        self.mask_buckets = (0.0, 0.25, 0.5, 0.75, 1.0)
+        self.joint_counts = {
+            (r, s): 0 for r in self.mask_buckets
+            for s in ("all_known", "all_unknown", "independent", "correlated")
+        }
         self._total = 0
 
     def record(self, ratio, regime):
         self.mask_counts[ratio] += 1
         self.regime_counts[regime] += 1
+        bucket = min(self.mask_buckets, key=lambda x: abs(float(x) - float(ratio)))
+        canonical = "independent" if regime == "mixed" else regime
+        if (bucket, canonical) in self.joint_counts:
+            self.joint_counts[(bucket, canonical)] += 1
         self._total += 1
 
     def report(self):
         n = max(1, self._total)
+        joint_counts = {}
+        for (ratio, regime), count in self.joint_counts.items():
+            joint_counts[f"{ratio:g}|{regime}"] = {
+                "joint_count": count,
+                "joint_fraction": count / n,
+            }
         return {
             "mask_freq": {r: c / n for r, c in self.mask_counts.items()},
             "regime_freq": {r: c / n for r, c in self.regime_counts.items()},
+            "joint_counts": joint_counts,
         }
 
 
@@ -309,6 +328,40 @@ def build_scheduler(optimizer, base_lr, warmup_steps, total_steps):
 # training step (Phase 3 MD §1-§3)
 # ---------------------------------------------------------------------------
 
+def _sample_mask(masker, occ, ratio, surrogate=None):
+    """Sample a block mask, honoring the model's Stage-A broadcast contract.
+
+    BlockMasker.sample draws PER-SAMPLE mask placements (independent top/left
+    per batch element). MaskedQueryPredictor (Joint Target Redesign §4, Stage
+    A) requires a single mask shape broadcast across the batch, so when the
+    active model demands it we sample ONE mask (batch 1) and repeat it. The
+    per-sample mask regime arrives with Stage F; until then the broadcast is
+    the documented Stage-A contract.
+    """
+    b = occ.shape[0]
+    if b == 1:
+        return masker.sample(occ, ratio, surrogate)
+    m1 = masker.sample(occ[:1], ratio, surrogate)   # (1, grid, grid)
+    return m1.repeat(b, 1, 1)
+
+
+def _write_json_atomic(path, payload):
+    """Write JSON via tmp+rename so a crash never leaves a half-parsed file.
+
+    Cloud runs persist only the checkpoints/ tree — stdout is NOT downloadable
+    via `kaggle kernels output`. Every metric that matters must therefore reach
+    disk, or the run is unjudgeable after the fact (this bit us once: the
+    Stage-A run's rich validate() diagnostics were computed, printed, and lost,
+    leaving only L_total — a scale-free number that read as a perfect result
+    while the model had collapsed).
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    os.replace(tmp, path)
+
+
 def training_step(model, objective, occ, sv, spec, cfg, device, step,
                   masker, rng, regime_logger, surrogate=None,
                   scalar_masker_bank=None):
@@ -349,7 +402,12 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
             "half_sensitivity masking requires the frozen surrogate")
         geo_true = assemble_metadit_geometry(
             occ, sv[:, 0], sv[:, 1], sv[:, 2])
-        M = masker.sample(geo_true, ratio, surrogate).to(device)
+        if getattr(model, "requires_broadcast_mask", False):
+            M = _sample_mask(masker, geo_true, ratio, surrogate).to(device)
+        else:
+            M = masker.sample(geo_true, ratio, surrogate).to(device)
+    elif getattr(model, "requires_broadcast_mask", False):
+        M = _sample_mask(masker, occ, ratio, surrogate).to(device)
     else:
         M = masker.sample(occ, ratio, surrogate).to(device)
 
@@ -357,7 +415,13 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     # Phase 4 MD §3.5.1: goal dropout — replace A_goal with null token ~10%
     gd_p = cfg.get("train", {}).get("guidance_dropout", 0.0)
     goal_mode = goal_dropout("real", gd_p, rng)
-    result = objective(model, occ, sv, sk, spec, M, goal_mode=goal_mode)
+    # Make the physics decision explicit. This is intentionally independent of
+    # model.training so the same contract can be used by eval; a baseline with
+    # no surrogate still returns a zero physics term.
+    result = objective(
+        model, occ, sv, sk, spec, M, goal_mode=goal_mode,
+        compute_physics=True,
+    )
     loss = result["total_loss"]
 
     regime_logger.record(ratio, regime)
@@ -391,11 +455,19 @@ def validate(model, objective, val_batches, cfg, device):
     metrics = {
         "raw_mse": [], "raw_cos_err": [], "raw_z_hat_norm": [],
         "raw_z_y_norm": [],
+        # collapse / scale health (see the RAW diagnostics block below)
+        "raw_z_hat_std_dim": [], "raw_z_y_std_dim": [],
+        "scale_ratio_zh_zy": [], "raw_z_y_geo_norm": [],
+        "joint_target_delta_rel": [],
         "proj_mse": [], "proj_cos_err": [], "proj_p_hat_norm": [],
         "proj_p_y_norm": [],
         "L_total": [], "L_inv": [], "L_var": [], "L_cov": [],
-        "L_scalar": [], "L_phys": [], "L_phys_weighted": [],
-        "scalar_err": [],
+        "L_scalar": [], "L_occ": [], "L_occ_weighted": [],
+        "L_phys": [], "L_phys_weighted": [],
+        "occupancy_iou": [], "occupancy_f1": [],
+        "pred_occupancy_fraction": [], "true_occupancy_fraction": [],
+        "scalar_err": [], "scalar_pred_min": [], "scalar_pred_max": [],
+        "scalar_out_of_range_fraction": [],
     }
     try:
         with torch.no_grad():
@@ -403,14 +475,23 @@ def validate(model, objective, val_batches, cfg, device):
                 B = occ.shape[0]
                 sk = torch.ones(B, 3, dtype=torch.bool, device=device)  # all known for val
                 # Validation masks are deterministic (fixed seed) and
-                # explicitly transferred to the model device.
-                M = val_masker.sample(occ, val_mask_ratio).to(device)
+                # explicitly transferred to the model device. Honor the
+                # Stage-A broadcast contract when the model demands it.
+                if getattr(model, "requires_broadcast_mask", False):
+                    M = _sample_mask(val_masker, occ, val_mask_ratio).to(device)
+                else:
+                    M = val_masker.sample(occ, val_mask_ratio).to(device)
                 assert M.device == occ.device, (
                     "validation mask must be on the model device")
-                result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+                # The model/objective are in eval mode here, but the frozen
+                # surrogate must still be evaluated for a truthful L_phys.
+                result = objective(
+                    model, occ, sv, sk, spec, M, goal_mode="real",
+                    compute_physics=True,
+                )
                 out = result["out"]
                 mask_bool = out["mask"]
-                z_hat, z_y = out["z_hat"], out["z_y_raw"]
+                z_hat, z_y = out["z_hat"], out.get("z_y_joint", out["z_y_raw"])
 
                 # --- RAW latent space diagnostics (masked tokens only) ---
                 z_hat_m = z_hat[mask_bool]
@@ -424,6 +505,29 @@ def validate(model, objective, val_batches, cfg, device):
                     float(z_hat_m.norm(dim=-1).mean()))
                 metrics["raw_z_y_norm"].append(
                     float(z_y_m.norm(dim=-1).mean()))
+
+                # --- collapse / scale diagnostics (§11, added after the
+                # Stage-A run collapsed while L_total read ~1e-5) ---
+                # raw_mse vs L_total disagreeing by orders of magnitude is the
+                # signature of "direction matched, magnitude ignored"; these
+                # three numbers make it visible during training instead of
+                # only in a post-mortem.
+                metrics["raw_z_hat_std_dim"].append(
+                    float(z_hat_m.float().std(dim=0).mean()))
+                metrics["raw_z_y_std_dim"].append(
+                    float(z_y_m.float().std(dim=0).mean()))
+                zy_norm_f = float(z_y_m.norm(dim=-1).mean())
+                if zy_norm_f > 0:
+                    metrics["scale_ratio_zh_zy"].append(
+                        float(z_hat_m.norm(dim=-1).mean()) / zy_norm_f)
+                if "z_y_joint" in out and "z_y_raw" in out:
+                    geo_m = out["z_y_raw"][mask_bool]
+                    geo_norm = float(geo_m.norm(dim=-1).mean())
+                    metrics["raw_z_y_geo_norm"].append(geo_norm)
+                    if geo_norm > 0:
+                        delta = float((z_y_m - geo_m).norm(dim=-1).mean())
+                        metrics["joint_target_delta_rel"].append(
+                            delta / geo_norm)
 
                 # --- PROJECTED latent space diagnostics (same tokens) ---
                 # p_hat/p_y are exactly the tensors L_inv uses.
@@ -444,10 +548,22 @@ def validate(model, objective, val_batches, cfg, device):
                 # --- Loss components (composition is explicit) ---
                 c = result["components"]
                 for k in ("L_total", "L_inv", "L_var", "L_cov", "L_scalar",
-                          "L_phys", "L_phys_weighted"):
+                          "L_occ", "L_occ_weighted", "L_phys",
+                          "L_phys_weighted"):
                     metrics[k].append(float(c[k]))
+                occ_metrics = occupancy_reconstruction_metrics(
+                    out["occupancy_logits"], occ)
+                for k, value in occ_metrics.items():
+                    metrics[k].append(float(value))
                 se = (out["scalar_pred"] - sv).abs().mean()
                 metrics["scalar_err"].append(float(se))
+                bounds = model.scalar_decoder.bounds.to(device=sv.device)
+                scalar_pred = out["scalar_pred"]
+                outside = ((scalar_pred < bounds[:, 0]) |
+                           (scalar_pred > bounds[:, 1])).float()
+                metrics["scalar_pred_min"].append(float(scalar_pred.min()))
+                metrics["scalar_pred_max"].append(float(scalar_pred.max()))
+                metrics["scalar_out_of_range_fraction"].append(float(outside.mean()))
     finally:
         model.train()
         objective.train()
@@ -467,6 +583,47 @@ def validate(model, objective, val_batches, cfg, device):
         out["normalized_guidance_gap"] = gap_info["normalized_guidance_gap"]
     except Exception as e:
         out["guidance_gap_error"] = str(e)
+
+    # Joint Target Redesign (docs/JOINT_TARGET_REDESIGN.md §11 conditioning
+    # diagnostics): does the TEACHER target actually depend on the spectrum?
+    # z_y_geo is identical across the two forwards (same geometry), so the
+    # real-vs-shuffled difference isolates the fusion's spectrum coupling —
+    # the redesign's central claim. At gate=0 this is exactly 0; a gate that
+    # opens without raising this metric means the fusion learned a
+    # spectrum-free delta (caught here, not claimed away).
+    fusion = getattr(model, "joint_target_fusion", None)
+    if fusion is not None:
+        out["joint_gate_tanh"] = float(torch.tanh(fusion.gate).detach())
+        try:
+            occ_v, sv_v, spec_v = val_batches[0]
+            B = occ_v.shape[0]
+            if B < 2:
+                out["target_spec_sensitivity"] = float("nan")
+                out["target_spec_sensitivity_error"] = (
+                    "shuffled control infeasible: B < 2")
+            else:
+                from runtime.physics_controls import make_shuffled_spectrum
+                diag_masker = BlockMasker(
+                    placement="random", grid=16, min_side=3, k_range=(1, 4),
+                    seed=777)
+                if getattr(model, "requires_broadcast_mask", False):
+                    Mv = _sample_mask(diag_masker, occ_v, val_mask_ratio).to(device)
+                else:
+                    Mv = diag_masker.sample(occ_v, val_mask_ratio).to(device)
+                sk_v = torch.ones(B, 3, dtype=torch.bool, device=device)
+                spec_shuf = make_shuffled_spectrum(spec_v)
+                with torch.no_grad():
+                    o_real = model(occ_v, sv_v, sk_v, spec_v, Mv,
+                                   goal_mode="real")
+                    o_shuf = model(occ_v, sv_v, sk_v, spec_shuf, Mv,
+                                   goal_mode="real")
+                sens = (o_real["z_y_joint"] - o_shuf["z_y_joint"]
+                        ).norm(dim=-1).mean()
+                scale = o_real["z_y_joint"].norm(dim=-1).mean().clamp(min=1e-8)
+                out["target_spec_sensitivity"] = float(sens)
+                out["target_spec_sensitivity_normalized"] = float(sens / scale)
+        except Exception as e:
+            out["target_spec_sensitivity_error"] = str(e)
 
     return out
 
@@ -522,6 +679,11 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         spec_path, device, allow_dummy=use_synthetic_smoke)
     model = build_unified_model(cfg, spec_weights, device=device)
     cfg.setdefault("_architecture_id", model.architecture_id)
+    # Bug fix (momentum schedule): set total_steps so the EMA momentum actually ramps
+    # 0.996 -> 0.999 across training instead of pinning at momentum_end. EMAEncoder's
+    # total_steps defaults to 1, so current_momentum(step) returns momentum_end for every
+    # step >= 1 and the documented ramp never happens.
+    model.set_total_steps(total_steps)
 
     # --- objective ---
     loss_cfg = cfg.get("loss", {})
@@ -554,7 +716,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         lambda_var=loss_cfg.get("lambda_var", 25.0),
         lambda_cov=loss_cfg.get("lambda_cov", 1.0),
         lambda_scalar=loss_cfg.get("lambda_scalar", 1.0),
+        lambda_occ=loss_cfg.get("lambda_occ", 1.0),
         lambda_phys=lambda_phys,
+        lambda_raw=loss_cfg.get("lambda_raw", 0.0),
         gamma=loss_cfg.get("gamma", 1.0),
         eps=loss_cfg.get("eps", 1e-4),
         surrogate=surrogate,
@@ -684,7 +848,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
               f"L_inv={components['L_inv']:.4f} "
               f"L_var={components['L_var']:.4f} "
               f"L_cov={components['L_cov']:.4f} "
-              f"L_scalar={components['L_scalar']:.4f}")
+              f"L_scalar={components['L_scalar']:.4f} "
+              f"L_occ={components['L_occ']:.4f}")
         assert torch.isfinite(loss), "smoke loss must be finite"
         return {"final_step": 0, "final_loss": float(loss.detach()),
                 "components": components, "regime_report": regime_logger.report()}
@@ -703,6 +868,31 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
     data_iter = iter(train_data) if use_synthetic or not isinstance(train_data, DataLoader) \
         else iter(loader)
+
+    # Persisted metric history. Cloud runs only keep the checkpoints/ tree, so
+    # anything printed to stdout is lost. Validation metrics (which include the
+    # raw-latent diagnostics that distinguish learning from collapse) and the
+    # training-loss curve are both written to disk as they are produced.
+    ckpt_dir_name = cfg.get("checkpoint_subdir", "unified")
+    metrics_dir = os.path.join(REPO_ROOT, "checkpoints", ckpt_dir_name)
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_history = []
+    train_loss_history = []
+    latest_val_metrics = {}
+
+    def _persist_metrics():
+        _write_json_atomic(
+            os.path.join(metrics_dir, "metrics_history.json"),
+            {"config": {k: cfg.get(k) for k in
+                        ("joint_target", "predictor_type", "hidden",
+                         "checkpoint_subdir")},
+             "val": metrics_history,
+             "train_loss": train_loss_history})
+
+    # Wall-clock instrumentation: without it there is no way to answer "how
+    # long does a run take" or to tell a genuinely fast run from one that
+    # silently skipped work.
+    t_start = time.time()
 
     last_loss = None
     for step in range(start_step, total_steps):
@@ -762,6 +952,12 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
         last_loss = np.mean(micro_losses)
 
+        train_loss_history.append({
+            "step": step,
+            "L_total": float(last_loss),
+            "lr": float(scheduler.get_last_lr()[0]),
+        })
+
         if step % log_every == 0:
             c = result["components"]
             # L_phys is the RAW physics term; L_phys_weighted is
@@ -771,25 +967,36 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             print(f"step {step:5d}  loss={last_loss:.4f}  "
                   f"L_inv={c['L_inv']:.4f} L_var={c['L_var']:.4f} "
                   f"L_cov={c['L_cov']:.4f} L_scalar={c['L_scalar']:.4f} "
+                  f"L_occ={c['L_occ']:.4f} L_occ_w={c['L_occ_weighted']:.4f} "
                   f"L_phys={c['L_phys']:.4f} "
                   f"L_phys_w={c['L_phys_weighted']:.4f} "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+                  f"lr={scheduler.get_last_lr()[0]:.2e} "
+                  f"elapsed={time.time() - t_start:.0f}s")
 
         if step % val_every == 0 and step > 0:
             val_metrics = validate(model, objective, val_batches, cfg, device)
             print(f"  [val] {json.dumps(val_metrics)}")
+            # Persist every validation point, not just the printed line. The
+            # raw-latent diagnostics in here are what distinguish genuine
+            # prediction from collapse; losing them makes a finished run
+            # unjudgeable.
+            latest_val_metrics = dict(val_metrics)
+            metrics_history.append({"step": step, **val_metrics})
+            _persist_metrics()
             model.train()
             objective.train()
 
         if step % ckpt_every == 0 and step > 0:
+            ckpt_dir_name = cfg.get("checkpoint_subdir", "unified")
             ckpt_path = os.path.join(
-                REPO_ROOT, "checkpoints", "unified", "latest.pt")
+                REPO_ROOT, "checkpoints", ckpt_dir_name, "latest.pt")
             os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
             ema_state = collect_ema_state(model)
             save_checkpoint(
                 ckpt_path, model, objective, optimizer, scheduler, cfg,
                 global_step=step, epoch=0, micro_step=0, batch_index=0,
-                is_epoch_end=False, metrics={"L_total": last_loss},
+                is_epoch_end=False,
+                metrics={"L_total": last_loss, **latest_val_metrics},
                 health={}, ema_state=ema_state,
                 masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
                 extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
@@ -798,23 +1005,45 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             print(f"  [ckpt] saved to {ckpt_path}")
 
     # Final checkpoint
-    ckpt_path = os.path.join(REPO_ROOT, "checkpoints", "unified", "final.pt")
+    ckpt_dir_name = cfg.get("checkpoint_subdir", "unified")
+    ckpt_path = os.path.join(REPO_ROOT, "checkpoints", ckpt_dir_name, "final.pt")
     os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
     ema_state = collect_ema_state(model)
     save_checkpoint(
         ckpt_path, model, objective, optimizer, scheduler, cfg,
         global_step=total_steps - 1, epoch=0, micro_step=0, batch_index=0,
-        is_epoch_end=True, metrics={"L_total": last_loss if last_loss else 0.0},
+        is_epoch_end=True,
+        metrics={"L_total": last_loss if last_loss else 0.0,
+                 **latest_val_metrics},
         health={}, ema_state=ema_state,
         masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
         extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
             scalar_masker_bank)},
         device=device, artifact_type="final")
 
+    # Flush the metric history one last time and drop a manifest beside the
+    # checkpoint so a finished cloud run can be judged from its output dir
+    # alone (stdout is not downloadable from Kaggle).
+    elapsed_total = time.time() - t_start
+    n_steps_run = max(total_steps - start_step, 1)
+    _persist_metrics()
+    _write_json_atomic(
+        os.path.join(metrics_dir, "final_metrics.json"),
+        {"final_step": total_steps - 1,
+         "final_train_loss": last_loss if last_loss else 0.0,
+         "final_val_metrics": latest_val_metrics,
+         "n_val_points": len(metrics_history),
+         "wall_clock_seconds": round(elapsed_total, 1),
+         "seconds_per_step": round(elapsed_total / n_steps_run, 4),
+         "steps_per_second": round(n_steps_run / max(elapsed_total, 1e-9), 3),
+         "steps_run": n_steps_run,
+         "regime_report": regime_logger.report()})
+
     report = {
         "final_step": total_steps - 1,
         "final_loss": last_loss if last_loss else 0.0,
         "regime_report": regime_logger.report(),
+        "metrics_dir": metrics_dir,
     }
     return report
 
@@ -883,7 +1112,9 @@ def preflight(cfg, device=None):
         lambda_var=cfg.get("loss", {}).get("lambda_var", 25.0),
         lambda_cov=cfg.get("loss", {}).get("lambda_cov", 1.0),
         lambda_scalar=cfg.get("loss", {}).get("lambda_scalar", 1.0),
+        lambda_occ=cfg.get("loss", {}).get("lambda_occ", 1.0),
         lambda_phys=max(cfg.get("loss", {}).get("lambda_phys", 0.0), 1.0),
+        lambda_raw=cfg.get("loss", {}).get("lambda_raw", 0.0),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
     ).to(device)
@@ -899,8 +1130,12 @@ def preflight(cfg, device=None):
     masker = BlockMasker(placement="random", grid=16, min_side=3,
                          k_range=(1, 4), seed=42)
     # Fix 1: the mask must be on the ACTIVE device (masker.sample returns a
-    # CPU tensor; the model forward requires M.device == occ.device).
-    M = masker.sample(occ, ratio=0.5, surrogate=surrogate).to(device)
+    # CPU tensor; the model forward requires M.device == occ.device). Honor
+    # the Stage-A broadcast contract when the model demands it.
+    if getattr(model, "requires_broadcast_mask", False):
+        M = _sample_mask(masker, occ, ratio=0.5, surrogate=surrogate).to(device)
+    else:
+        M = masker.sample(occ, ratio=0.5, surrogate=surrogate).to(device)
     assert M.device == occ.device, "preflight: mask must be on the model device"
     sk = torch.zeros(b, 3, dtype=torch.bool, device=device)  # all unknown (hard stratum)
     assert sk.device == occ.device, "preflight: scalar_known must be on the model device"
@@ -1022,7 +1257,15 @@ def preflight(cfg, device=None):
         "unknown_scalar_precedence_ok": True,
     }
 
-    # Gradient ownership.
+    # Gradient ownership. The active predictor is GCLCT on the legacy line
+    # and MaskedQueryPredictor on the Joint Target Redesign line — pick the
+    # one the model actually exposes so the "predictor received gradients"
+    # guard stays meaningful on both.
+    active_predictor = getattr(model, "masked_query_predictor", None)
+    if active_predictor is None:
+        active_predictor = getattr(model, "predictor", None)
+    predictor_params = (active_predictor.parameters()
+                        if active_predictor is not None else [])
     student_grads = sum(
         1 for p in model.parameters()
         if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
@@ -1030,7 +1273,13 @@ def preflight(cfg, device=None):
         1 for p in model.geometry_decoder.parameters()
         if p.grad is not None and p.grad.abs().sum() > 0)
     predictor_grads = sum(
-        1 for p in model.predictor.parameters()
+        1 for p in predictor_params
+        if p.grad is not None and p.grad.abs().sum() > 0)
+    # Joint Target Redesign: the fusion's gate/attn parameters ARE trainable
+    # (the teacher learns through z_y_joint); confirm they received gradient.
+    fusion = getattr(model, "joint_target_fusion", None)
+    fusion_grads = sum(
+        1 for p in (fusion.parameters() if fusion is not None else [])
         if p.grad is not None and p.grad.abs().sum() > 0)
     surrogate_grads = sum(
         1 for p in surrogate.parameters() if p.grad is not None)
@@ -1046,6 +1295,7 @@ def preflight(cfg, device=None):
         "student_params_with_grad": student_grads,
         "decoder_params_with_grad": decoder_grads,
         "predictor_params_with_grad": predictor_grads,
+        "fusion_params_with_grad": fusion_grads,
         "surrogate_params_with_grad": surrogate_grads,
         "ema_params_with_grad": ema_grads,
         "scalar_mlp_ema_params_with_grad": scalar_ema_grads,
@@ -1056,6 +1306,12 @@ def preflight(cfg, device=None):
         raise RuntimeError("preflight: no student parameters received gradients")
     if decoder_grads == 0 or predictor_grads == 0:
         raise RuntimeError("preflight: decoder/predictor received no gradients")
+    if fusion is not None and fusion_grads == 0:
+        raise RuntimeError(
+            "preflight: joint_target_fusion received no gradients — the "
+            "teacher's spectrum coupling is not learning. Check that the "
+            "objective consumes z_y_joint (not z_y_raw) and that the loss "
+            "term reaching the target side is non-zero (e.g. lambda_raw>0).")
     if surrogate_grads != 0 or ema_grads != 0 or scalar_ema_grads != 0 or released_grads != 0:
         raise RuntimeError(
             f"preflight: frozen params received gradients: {ownership}")

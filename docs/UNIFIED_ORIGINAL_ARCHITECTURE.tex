@@ -1,0 +1,381 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\definecolor{codebg}{RGB}{245,247,250}
+\lstset{basicstyle=\ttfamily\small,backgroundcolor=\color{codebg},frame=single,breaklines=true,columns=fullflexible,keepspaces=true}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Unified JEPA}
+\rhead{Original Architecture}
+\cfoot{\thepage}
+\title{Unified JEPA --- Original Present Architecture}
+\author{Metasurface Inverse Design}
+\date{September 2026}
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Scope}
+This document describes the original repaired architecture identified as
+\texttt{unified\_occ\_param\_spectrum\_jepa\_v1}. It intentionally excludes the
+later experimental additions: the direct goal residual, real-vs-null ranking
+loss, and detached comparison branches.
+
+The task is spectrum-conditioned inverse design:
+\begin{lstlisting}
+incomplete geometry + scalar observations + requested spectrum
+                           |
+                           v
+                    completed geometry
+                           |
+                           v
+                  simulated target spectrum
+\end{lstlisting}
+The model must reconstruct valid geometry and change that geometry in response
+to the requested target spectrum.
+
+\section{Semantic data representation}
+The released MetaDiT geometry has shape \texttt{[3,64,64]} and uses:
+\begin{lstlisting}
+channel 0 = occupancy * (r_atom / 5)
+channel 1 = occupancy * h_atom
+channel 2 = occupancy * (l_lattice / 3)
+\end{lstlisting}
+The unified model factorizes this into:
+\begin{lstlisting}
+occupancy: [1,64,64]
+scalars:   [l_lattice, h_atom, r_atom]
+\end{lstlisting}
+The scalar order is fixed everywhere. Approximate valid ranges are:
+\begin{lstlisting}
+l_lattice: [2.5, 3.0]
+h_atom:    [0.5, 1.0]
+r_atom:    [3.5, 5.0]
+\end{lstlisting}
+Every scalar also has a known/unknown flag. Unknown values are zeroed before
+the scalar encoder. Known values are hard-retained during final assembly.
+
+\section{Occupancy masking}
+The \texttt{64x64} occupancy image is represented on a \texttt{16x16} token
+grid with patch size 4. Training masks one to four axis-aligned rectangular
+blocks using ratios 25\%, 50\%, 75\%, and 100\%.
+\begin{lstlisting}
+1 = visible token
+0 = masked token
+\end{lstlisting}
+Masked positions receive learned mask tokens and positional information.
+Visible occupancy pixels are hard-retained during geometry assembly. The
+critical evaluation regime is:
+\begin{lstlisting}
+100% occupancy masked + all scalars unknown
+\end{lstlisting}
+
+\section{Original end-to-end data flow}
+\begin{lstlisting}
+occupancy + scalar values/flags
+              |
+              v
+       masked occupancy encoder
+              |
+       geometry tokens z_x
+              |------------------+
+              v                  v
+       scalar encoder      released spectrum encoder
+              |                  |
+       scalar summary      local spectrum tokens
+              |                  |
+              |           c_physics + a_goal
+              +----------+-------+
+                         |
+                         v
+                  fusion transformer
+                         |
+                         v
+                    GCLCT predictor
+                         |
+                         v
+                       z_hat
+                         |
+                         v
+                    geometry decoder
+                         |
+                         v
+                   assembled geometry
+                         |
+                         v
+                  frozen EM surrogate
+                         |
+                         v
+                   predicted spectrum
+\end{lstlisting}
+The EMA target path is separate:
+\begin{lstlisting}
+complete true geometry -> EMA encoder -> z_y
+\end{lstlisting}
+The EMA target receives geometry but not the requested spectrum.
+
+\section{Geometry and scalar encoders}
+The masked occupancy encoder maps the input into 256 geometry tokens:
+\begin{lstlisting}
+[B,1,64,64] -> patch embedding -> [B,256,192] = z_x
+\end{lstlisting}
+The scalar encoder receives:
+\begin{lstlisting}
+[l_value, l_known,
+ h_value, h_known,
+ r_value, r_known]
+\end{lstlisting}
+It produces FiLM parameters for scalar-conditioned processing and one scalar
+summary token for the fusion and predictor path.
+
+\section{Released spectrum path}
+The released MetaDiT spectrum encoder remains frozen:
+\begin{lstlisting}
+S [B,2,301] -> released encoder -> A_local [B,301,256]
+\end{lstlisting}
+
+\subsection{Global physics condition}
+The local spectrum tokens are mean-pooled over frequency and projected:
+\begin{lstlisting}
+A_local.mean(frequency) -> c_physics [B,384]
+\end{lstlisting}
+\texttt{c\_physics} FiLM-modulates every GCLCT predictor block.
+
+\subsection{Structured goal tokens}
+Sixteen learned queries cross-attend over the 301 local spectrum tokens:
+\begin{lstlisting}
+learned queries + A_local -> a_goal [B,16,384]
+\end{lstlisting}
+These tokens enter both the fusion sequence and predictor key/value sequence.
+
+\subsection{Null diagnostic}
+The null goal mode replaces both spectrum representations with zeros:
+\begin{lstlisting}
+c_physics = 0
+a_goal = 0
+\end{lstlisting}
+This tests whether the model uses the requested spectrum or falls back to a
+geometry prior. The released spectrum encoder itself was not redesigned.
+
+\section{Fusion and GCLCT predictor}
+The fusion transformer concatenates 256 occupancy tokens, 16 goal tokens, and
+one scalar token, for 273 tokens total.
+
+The GCLCT predictor receives 256 occupancy completion queries plus one scalar
+query, a key/value sequence containing 256 fused occupancy tokens plus 16 goal
+tokens, and the global condition \texttt{c\_physics}.
+
+Each block contains:
+\begin{lstlisting}
+affine-less LayerNorm -> FiLM(c_physics) -> self-attention
+affine-less LayerNorm -> FiLM(c_physics) -> cross-attention
+affine-less LayerNorm -> FiLM(c_physics) -> MLP
+\end{lstlisting}
+The output is \texttt{z\_hat [B,257,192]}. The first 256 tokens predict
+occupancy latents; the final token predicts the scalar summary.
+
+\section{EMA target and JEPA/VICReg objective}
+The complete true occupancy is passed through a frozen EMA copy:
+\begin{lstlisting}
+complete occupancy -> EMA encoder -> z_y_raw [B,256,192]
+\end{lstlisting}
+The EMA scalar copy supplies target-side FiLM conditioning. It is not a second
+scalar latent target.
+
+The objective owns a shared projector:
+\begin{lstlisting}
+z_hat -> projector -> p_hat
+z_y   -> projector -> p_y
+\end{lstlisting}
+The representation losses are:
+\begin{lstlisting}
+L_inv = masked prediction invariance
+L_var = variance regularization
+L_cov = covariance regularization
+\end{lstlisting}
+The repaired weights were approximately \texttt{lambda\_inv=25},
+\texttt{lambda\_var=25}, and \texttt{lambda\_cov=1}.
+
+The decoder consumes raw \texttt{z\_hat}, while the dominant representation
+objective is measured in projected space:
+\begin{lstlisting}
+raw latent cosine       = -0.06618
+projected latent cosine =  0.997437
+\end{lstlisting}
+This is the projector-absorption risk: projected alignment can look excellent
+while the raw decoder latent remains poorly aligned.
+
+\section{Scalar and occupancy decoders}
+The scalar-summary token is decoded into the three physical parameters. Each
+output is bounded with:
+\begin{lstlisting}
+prediction = lo + (hi - lo) * sigmoid(raw)
+\end{lstlisting}
+The 256 occupancy tokens are reshaped into a \texttt{16x16} feature map,
+upsampled to \texttt{64x64}, and decoded into occupancy logits. The decoder is
+FiLM-conditioned by effective scalars:
+\begin{lstlisting}
+known scalar   -> true scalar
+unknown scalar -> predicted scalar
+\end{lstlisting}
+The active occupancy reconstruction term is:
+\begin{lstlisting}
+L_occ = BCEWithLogits(occupancy_logits, true_occupancy)
+\end{lstlisting}
+It is reported with occupancy IoU, occupancy F1, predicted occupancy fraction,
+and true occupancy fraction.
+
+\section{Geometry assembly and physics surrogate}
+The decoded outputs are assembled back to the MetaDiT convention:
+\begin{lstlisting}
+occupancy * (r_atom / 5)
+occupancy * h_atom
+occupancy * (l_lattice / 3)
+\end{lstlisting}
+Visible occupancy pixels and known scalar values are retained before the
+surrogate.
+
+The assembled geometry is passed through the frozen MetaDiT forward surrogate:
+\begin{lstlisting}
+geometry [B,3,64,64] -> frozen surrogate -> spectrum [B,2,301]
+\end{lstlisting}
+The surrogate stays in evaluation mode and receives no parameter gradients.
+Gradients with respect to geometry remain enabled. The normalized physics loss
+is a SmoothL1 comparison between predicted and requested spectra.
+
+\section{Repaired original objective}
+The repaired objective is:
+\begin{lstlisting}
+L = lambda_inv    * L_inv
+  + lambda_var    * L_var
+  + lambda_cov    * L_cov
+  + lambda_scalar * L_scalar
+  + lambda_occ    * L_occ
+  + lambda_phys   * L_phys
+\end{lstlisting}
+
+The key repairs were:
+\begin{itemize}[leftmargin=*]
+\item \textbf{Occupancy supervision:} adding \texttt{L\_occ} so the
+\texttt{lambda\_phys=0} baseline also trains its occupancy decoder.
+\item \textbf{Validation physics:} allowing the real surrogate path to run
+during validation even when the model is in \texttt{eval()} mode.
+\item \textbf{Scalar validity:} bounding scalar outputs and reporting violations.
+\item \textbf{Reproducibility:} recording joint regimes, diagnostics,
+validation IDs, checkpoint manifests, and SHA-256 hashes.
+\end{itemize}
+
+\section{Repaired original-architecture result}
+The repaired original architecture used a selected physics weight near
+\texttt{lambda\_phys=0.2}, seed 42, and the hard stratum of 100\% occupancy
+masking with all scalars unknown.
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Metric & Value \\
+\midrule
+Physics real & 0.492732 \\
+Physics null & 0.485704 \\
+Physics shuffled & 0.518057 \\
+Occupancy IoU & 0.690314 \\
+Occupancy F1 & 0.815067 \\
+Scalar normalized MAE & 0.237963 \\
+Scalar out-of-range fraction & 0 \\
+Geometry sensitivity & 0.0111547 \\
+$c_{\rm physics}$ variation & 0.091998 \\
+$a_{\rm goal}$ variation & 0.085290 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Lower physics error is better. Geometry reconstruction is non-degenerate,
+scalar predictions are valid, and real goals outperform shuffled goals.
+However, real goals do not outperform null goals, so target conditioning is
+measurable but not yet reliable.
+
+\section{Later experiments excluded from this architecture}
+After the original architecture, three separate experiments were tested.
+
+\subsection{Direct goal residual}
+The experiment added:
+\begin{lstlisting}
+z_base + direct spectrum residual = z_final
+\end{lstlisting}
+This gave spectrum information a shorter path to masked occupancy tokens. The
+first version increased goal sensitivity but still had a spectrum-aware base
+predictor, so it was not a fully separated base/goal design.
+
+\subsection{Real-vs-null ranking}
+A ranking term required real physics error to be lower than null and shuffled
+errors. The first version could satisfy the ordering by making null outputs
+worse, so it was not accepted as a production architecture.
+
+\subsection{Detached comparison branches}
+The next version detached null and shuffled comparison errors so the ranking loss
+could not improve merely by damaging comparison outputs. This remains an
+experiment and is not part of the original architecture in this document.
+
+\section{Strengths and limitation}
+The original design has solid foundations: semantic factorization, explicit
+scalar missingness, rectangular block masking, released encoder reuse, an EMA
+geometry target, a frozen but differentiable surrogate, hard retention of known
+values, bounded scalar outputs, active occupancy reconstruction, curriculum
+logging, gradient ownership checks, and recoverable checkpoints.
+
+The main limitation is not raw data factorization. Geometry and spectrum are
+already separate semantic inputs. The limitation is that they are mixed before
+the main prediction objective is resolved:
+\begin{lstlisting}
+geometry tokens + goal tokens + scalar token
+              -> shared predictor
+\end{lstlisting}
+At the same time, JEPA targets a geometry-only latent. Therefore the
+spectrum-conditioned student is trained toward a target that contains no
+spectrum information. This explains the combination of strong projected JEPA
+alignment, weak raw decoder-latent alignment, nonzero spectrum sensitivity, and
+a weak real-goal advantage over null.
+
+\section{One-page summary}
+\begin{lstlisting}
+DATA
+  MetaDiT geometry -> occupancy + [l_lattice,h_atom,r_atom]
+  target spectrum  -> frozen released spectrum encoder
+
+CONTEXT
+  block-masked occupancy -> 256 geometry tokens
+  scalar values/flags    -> FiLM + scalar summary
+
+GOAL
+  spectrum tokens -> c_physics + 16 a_goal tokens
+
+PREDICTOR
+  geometry + goal + scalar tokens -> fusion -> GCLCT -> z_hat
+
+TARGET
+  complete geometry -> EMA encoder -> z_y
+
+DECODER
+  z_hat -> occupancy logits + scalar predictions
+       -> known-value retention + geometry assembly
+       -> frozen MetaDiT surrogate
+\end{lstlisting}
+
+The original architecture is correctly connected at the data, decoder, and
+physics boundaries. Its unresolved scientific issue is target-specific
+geometry selection: the requested spectrum must improve decoded geometry rather
+than merely alter the latent representation.
+
+\end{document}
+

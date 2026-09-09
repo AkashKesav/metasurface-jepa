@@ -23,6 +23,12 @@ from scripts.train.train_milestone_b import build_scheduler
 from data.mask import BlockMasker
 from runtime.device import resolve_device
 
+_SPEC_WEIGHTS = os.path.join(REPO_ROOT, "data/metadit/weights/spec_encoder.pth")
+_skip_no_spec = pytest.mark.skipif(
+    not os.path.exists(_SPEC_WEIGHTS),
+    reason="spectrum encoder weights not present (data/metadit/weights/ is "
+           "git-ignored, staged on cloud per CLOUD_TRAINING.md)")
+
 
 def _make_tiny_setup(device):
     cfg = {
@@ -44,6 +50,7 @@ def _make_tiny_setup(device):
     return model, objective, optimizer, scheduler, masker, cfg
 
 
+@_skip_no_spec
 def test_checkpoint_schema_validation():
     """Checkpoint missing required keys fails loudly."""
     device = resolve_device("cpu")
@@ -59,6 +66,7 @@ def test_checkpoint_schema_validation():
             load_checkpoint(ckpt_path, model2, objective2, optimizer2, scheduler2, device)
 
 
+@_skip_no_spec
 def test_checkpoint_schema_version_mismatch():
     """Wrong schema version fails loudly."""
     device = resolve_device("cpu")
@@ -96,6 +104,7 @@ def test_checkpoint_schema_version_mismatch():
             load_checkpoint(ckpt_path, model2, objective2, optimizer2, scheduler2, device)
 
 
+@_skip_no_spec
 def test_checkpoint_valid_schema_passes():
     """Valid checkpoint passes schema validation."""
     device = resolve_device("cpu")
@@ -118,6 +127,7 @@ def test_checkpoint_valid_schema_passes():
         assert obj["schema_version"] == CHECKPOINT_SCHEMA_VERSION
 
 
+@_skip_no_spec
 def test_checkpoint_required_keys_present():
     """All REQUIRED_CHECKPOINT_KEYS are present in saved checkpoint."""
     device = resolve_device("cpu")

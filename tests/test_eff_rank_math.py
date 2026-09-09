@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 import torch
 
 from diagnostics.representation_health import (  # noqa: E402
-    COLLAPSED_ANCHOR, eff_ranks, goal_token_stats,
+    COLLAPSED_ANCHOR, eff_ranks, goal_token_stats, token_eff_ranks,
+    token_space_stats,
 )
 
 
@@ -79,6 +80,55 @@ def test_collapsed_anchor_on_exp_scale():
     """The collapsed anchor must have moved to the exp(H) scale (item 2 fix)."""
     assert abs(COLLAPSED_ANCHOR["eff_rank_unnorm"] - math.exp(2.5986)) < 1e-3
     assert abs(COLLAPSED_ANCHOR["eff_rank_frac"] - math.exp(2.5986) / 384.0) < 1e-5
+
+
+def test_two_row_pooled_input_is_refused_as_degenerate():
+    """Regression for the September pred_eff_rank_frac = 0.5000000 false-stable
+    failure: a (B=2, D) matrix has centered rank <= 1, so eff_rank_frac is
+    deterministically 1/min(2,D) regardless of data. eff_ranks must REFUSE this
+    with NaN rather than emit a data-blind number that misclassifies as stable.
+    """
+    for D in (3, 8, 192):
+        s_random = eff_ranks(torch.randn(2, D))
+        s_identical = eff_ranks(torch.ones(2, D))   # both rows identical -> rank 1
+        for k in ("eff_rank_unnorm", "eff_rank_frac", "participation", "top_eig_frac"):
+            assert math.isnan(s_random[k]), f"B=2 D={D} {k} must be NaN, got {s_random[k]}"
+            assert math.isnan(s_identical[k]), f"B=2 D={D} identical {k} must be NaN"
+
+
+def test_three_row_input_still_measured():
+    """n=3 is NOT provably degenerate (centered rank <= 2), so the guard refuses
+    only n<3 — a 3-row matrix still gets a real number (no over-refusal)."""
+    s = eff_ranks(torch.randn(3, 8))
+    assert math.isfinite(s["eff_rank_unnorm"]) and math.isfinite(s["eff_rank_frac"])
+
+
+def test_token_eff_ranks_has_real_dynamic_range_at_small_batch():
+    """The CONTRACT-recommended token-level gauge on flattened (N_tokens, D):
+    even at validation batch B=2 with T masked tokens, N_tokens = 2*T is large,
+    so the gauge has real dynamic range (a collapsed latent reads low, a
+    spread latent reads high) — the gauge the pooled (B=2, D) path could never
+    provide. Keys are token_eff_rank_-namespaced to coexist with pooled stats.
+    """
+    D, T = 16, 64
+    collapsed = torch.zeros(2, T, D) + torch.randn(1, D)   # all tokens identical
+    spread = torch.randn(2, T, D)
+    sc = token_eff_ranks(collapsed.reshape(-1, D))
+    ss = token_eff_ranks(spread.reshape(-1, D))
+    for k in ("token_eff_rank_unnorm", "token_eff_rank_frac"):
+        assert sc[k] < ss[k], f"{k}: collapsed {sc[k]} should be < spread {ss[k]}"
+    assert sc["token_eff_rank_unnorm"] < 2.0, "collapsed token gauge should be ~1"
+
+
+def test_token_space_stats_carries_both_pooled_and_token_gauges():
+    """token_space_stats on a (B=2, T, D) token latent: pooled eff_rank is NaN
+    (degeneracy guard), but the token_eff_rank gauge is a real number — so a
+    small-batch validation run never loses its rank signal entirely."""
+    s = token_space_stats(torch.randn(2, 64, 16))
+    assert math.isnan(s["eff_rank_frac"]), "pooled eff_rank_frac must be NaN at B=2"
+    assert math.isfinite(s["token_eff_rank_frac"]), (
+        "token_eff_rank_frac must be a real number even at small batch")
+    assert s["token_eff_rank_frac"] > 0.0
 
 
 if __name__ == "__main__":

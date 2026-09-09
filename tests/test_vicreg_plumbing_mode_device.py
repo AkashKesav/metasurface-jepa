@@ -182,9 +182,12 @@ def test_a_objective_lives_on_selected_device_next_to_model():
     objective = VICRegObjective().to(device)
 
     objective_device = next(objective.parameters()).device
-    assert objective_device == device, (
+    # On a real GPU, .to(device) places params on cuda:0 (index=0), while
+    # torch.device("cuda") has no index — they're the same physical device
+    # but not equal under ==. Compare by type, not by exact device object.
+    assert objective_device.type == device.type, (
         f"Objective parameters are on {objective_device}, expected {device}")
-    assert all(p.device == device for p in objective.parameters())
+    assert all(p.device.type == device.type for p in objective.parameters())
 
     G, S = _batch(seed=3)
     G, S = G.to(device), S.to(device)
