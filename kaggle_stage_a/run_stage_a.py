@@ -42,7 +42,7 @@ BRANCH = "docs/full-training-audit-pr"
 FORK_URL = "https://github.com/AkashKesav/metasurface-jepa.git"
 # Pin the exact commit this kernel was authored against, so a later push to
 # the branch cannot silently change what runs.
-EXPECTED_TIP = "4c2a6bf91b50119099d76aa3cc354d21ccfff2df"
+EXPECTED_TIP = "338f1252957b0c4e1c9812bcb7ed6afc86365fd4"
 
 # 1. Clone the pinned branch.
 if REPO.exists():

@@ -1,0 +1,75 @@
+{
+  "checkpoint": ".kaggle_stage_a_output/metasurface-jepa/checkpoints/unified_stage_a/final.pt",
+  "step": 1499,
+  "split": "val",
+  "by_mask_ratio": {
+    "r0.5": {
+      "raw_mse": 235.67223358154297,
+      "raw_cos_err": 0.001222833408974111,
+      "z_hat_std_dim": 0.008845081320032477,
+      "z_hat_norm": 13.859880924224854,
+      "z_y_std_dim": 0.66587695479393,
+      "z_y_norm": 226.52127075195312,
+      "proj_mse": 2.2580726146698,
+      "proj_cos_err": 0.014493468683212996,
+      "L_total": 1.273788893740857e-05,
+      "L_inv": 2.2580726146698,
+      "L_var": 0.9615951776504517,
+      "L_cov": 0.0032550375908613205,
+      "L_scalar": 0.0,
+      "L_occ": 0.7402569353580475,
+      "L_phys": 0.0,
+      "z_y_geo_norm": 41.65923309326172,
+      "joint_target_delta_rel": 4.657060146331787,
+      "scale_ratio_zh_zy": 0.06118578126555627,
+      "target_norm_growth_vs_geo": 5.437480575910851,
+      "z_hat_concentration": 0.0006381787382150369,
+      "z_y_concentration": 0.0029395780474986088,
+      "target_spec_sensitivity": 0.7655798196792603,
+      "target_spec_sensitivity_normalized": 0.003383774310350418,
+      "joint_gate_tanh": -0.09435328841209412,
+      "n_batches": 2
+    }
+  },
+  "init_baseline": {
+    "r0.5": {
+      "raw_mse": 6.6087915897369385,
+      "raw_cos_err": 0.9999998509883881,
+      "z_hat_std_dim": 0.022119789384305477,
+      "z_hat_norm": 13.856367588043213,
+      "z_y_std_dim": 0.6644570231437683,
+      "z_y_norm": 30.88217544555664,
+      "proj_mse": 0.024435490369796753,
+      "proj_cos_err": 0.5864132940769196,
+      "L_total": 0.011098816990852356,
+      "L_inv": 0.024435490369796753,
+      "L_var": 0.9598992466926575,
+      "L_cov": 0.0032837181352078915,
+      "L_scalar": 0.0,
+      "L_occ": 0.6775522232055664,
+      "L_phys": 0.0,
+      "z_y_geo_norm": 30.88217544555664,
+      "joint_target_delta_rel": 0.0,
+      "scale_ratio_zh_zy": 0.4486849578479706,
+      "target_norm_growth_vs_geo": 1.0,
+      "z_hat_concentration": 0.001596362772837583,
+      "z_y_concentration": 0.021515874887608383,
+      "target_spec_sensitivity": 0.0,
+      "target_spec_sensitivity_normalized": 0.0,
+      "joint_gate_tanh": 0.0,
+      "n_batches": 2
+    }
+  },
+  "verdict": "FAIL",
+  "verdict_failures": [
+    "COLLAPSE: predictor emits ~one vector for every masked token (std/norm=0.000638 < 0.01)",
+    "SCALE MISMATCH: ||z_hat||/||z_y||=0.0612 \u2014 invisible to a cosine-only loss, so L_total is not evidence of learning",
+    "FUSION DOMINATES: ||Z_joint - Z_geo|| / ||Z_geo|| = 4.66 > 1 \u2014 the target is no longer geometry-anchored",
+    "GOAL DEAD: shuffling the goal spectrum moves the target by 0.00338 of its norm (< 1%) \u2014 conditioning is not usable"
+  ],
+  "verdict_notes": [
+    "raw_mse=235.7 (absolute latent error)",
+    "fusion gate tanh=-0.09435 (open)"
+  ],
+  "eval_seconds": 1.7
+}

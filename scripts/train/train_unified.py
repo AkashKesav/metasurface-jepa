@@ -345,6 +345,23 @@ def _sample_mask(masker, occ, ratio, surrogate=None):
     return m1.repeat(b, 1, 1)
 
 
+def _write_json_atomic(path, payload):
+    """Write JSON via tmp+rename so a crash never leaves a half-parsed file.
+
+    Cloud runs persist only the checkpoints/ tree — stdout is NOT downloadable
+    via `kaggle kernels output`. Every metric that matters must therefore reach
+    disk, or the run is unjudgeable after the fact (this bit us once: the
+    Stage-A run's rich validate() diagnostics were computed, printed, and lost,
+    leaving only L_total — a scale-free number that read as a perfect result
+    while the model had collapsed).
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    os.replace(tmp, path)
+
+
 def training_step(model, objective, occ, sv, spec, cfg, device, step,
                   masker, rng, regime_logger, surrogate=None,
                   scalar_masker_bank=None):
@@ -825,6 +842,31 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     data_iter = iter(train_data) if use_synthetic or not isinstance(train_data, DataLoader) \
         else iter(loader)
 
+    # Persisted metric history. Cloud runs only keep the checkpoints/ tree, so
+    # anything printed to stdout is lost. Validation metrics (which include the
+    # raw-latent diagnostics that distinguish learning from collapse) and the
+    # training-loss curve are both written to disk as they are produced.
+    ckpt_dir_name = cfg.get("checkpoint_subdir", "unified")
+    metrics_dir = os.path.join(REPO_ROOT, "checkpoints", ckpt_dir_name)
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_history = []
+    train_loss_history = []
+    latest_val_metrics = {}
+
+    def _persist_metrics():
+        _write_json_atomic(
+            os.path.join(metrics_dir, "metrics_history.json"),
+            {"config": {k: cfg.get(k) for k in
+                        ("joint_target", "predictor_type", "hidden",
+                         "checkpoint_subdir")},
+             "val": metrics_history,
+             "train_loss": train_loss_history})
+
+    # Wall-clock instrumentation: without it there is no way to answer "how
+    # long does a run take" or to tell a genuinely fast run from one that
+    # silently skipped work.
+    t_start = time.time()
+
     last_loss = None
     for step in range(start_step, total_steps):
         # Phase 4 MD §4.1: ramp lambda_phys from 0 to target over ramp steps
@@ -883,6 +925,12 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
         last_loss = np.mean(micro_losses)
 
+        train_loss_history.append({
+            "step": step,
+            "L_total": float(last_loss),
+            "lr": float(scheduler.get_last_lr()[0]),
+        })
+
         if step % log_every == 0:
             c = result["components"]
             # L_phys is the RAW physics term; L_phys_weighted is
@@ -895,11 +943,19 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                   f"L_occ={c['L_occ']:.4f} L_occ_w={c['L_occ_weighted']:.4f} "
                   f"L_phys={c['L_phys']:.4f} "
                   f"L_phys_w={c['L_phys_weighted']:.4f} "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+                  f"lr={scheduler.get_last_lr()[0]:.2e} "
+                  f"elapsed={time.time() - t_start:.0f}s")
 
         if step % val_every == 0 and step > 0:
             val_metrics = validate(model, objective, val_batches, cfg, device)
             print(f"  [val] {json.dumps(val_metrics)}")
+            # Persist every validation point, not just the printed line. The
+            # raw-latent diagnostics in here are what distinguish genuine
+            # prediction from collapse; losing them makes a finished run
+            # unjudgeable.
+            latest_val_metrics = dict(val_metrics)
+            metrics_history.append({"step": step, **val_metrics})
+            _persist_metrics()
             model.train()
             objective.train()
 
@@ -912,7 +968,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             save_checkpoint(
                 ckpt_path, model, objective, optimizer, scheduler, cfg,
                 global_step=step, epoch=0, micro_step=0, batch_index=0,
-                is_epoch_end=False, metrics={"L_total": last_loss},
+                is_epoch_end=False,
+                metrics={"L_total": last_loss, **latest_val_metrics},
                 health={}, ema_state=ema_state,
                 masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
                 extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
@@ -928,17 +985,38 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     save_checkpoint(
         ckpt_path, model, objective, optimizer, scheduler, cfg,
         global_step=total_steps - 1, epoch=0, micro_step=0, batch_index=0,
-        is_epoch_end=True, metrics={"L_total": last_loss if last_loss else 0.0},
+        is_epoch_end=True,
+        metrics={"L_total": last_loss if last_loss else 0.0,
+                 **latest_val_metrics},
         health={}, ema_state=ema_state,
         masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
         extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
             scalar_masker_bank)},
         device=device, artifact_type="final")
 
+    # Flush the metric history one last time and drop a manifest beside the
+    # checkpoint so a finished cloud run can be judged from its output dir
+    # alone (stdout is not downloadable from Kaggle).
+    elapsed_total = time.time() - t_start
+    n_steps_run = max(total_steps - start_step, 1)
+    _persist_metrics()
+    _write_json_atomic(
+        os.path.join(metrics_dir, "final_metrics.json"),
+        {"final_step": total_steps - 1,
+         "final_train_loss": last_loss if last_loss else 0.0,
+         "final_val_metrics": latest_val_metrics,
+         "n_val_points": len(metrics_history),
+         "wall_clock_seconds": round(elapsed_total, 1),
+         "seconds_per_step": round(elapsed_total / n_steps_run, 4),
+         "steps_per_second": round(n_steps_run / max(elapsed_total, 1e-9), 3),
+         "steps_run": n_steps_run,
+         "regime_report": regime_logger.report()})
+
     report = {
         "final_step": total_steps - 1,
         "final_loss": last_loss if last_loss else 0.0,
         "regime_report": regime_logger.report(),
+        "metrics_dir": metrics_dir,
     }
     return report
 
