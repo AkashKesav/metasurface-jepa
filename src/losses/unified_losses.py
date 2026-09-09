@@ -234,7 +234,12 @@ class UnifiedJEPALoss(nn.Module):
         # JEPA/VICReg representation target. Physics decodes z_hat, while
         # representation losses supervise the base latent when available.
         z_hat_repr = out.get("z_hat_base", z_hat)
-        z_y = out["z_y_raw"]
+        # Joint Target Redesign (docs/JOINT_TARGET_REDESIGN.md §3): when the
+        # model exposes a joint target (Z_joint = J(Z_G, Z_S)) the objective
+        # supervises against IT — the geometry-only z_y_raw remains a
+        # diagnostic (target-side gate-closed reference). Models built before
+        # the redesign expose only z_y_raw and behave exactly as before.
+        z_y = out.get("z_y_joint", out["z_y_raw"])
 
         # Projected space (shared projector, single forward per branch)
         p_hat_full = self.projector(z_hat_repr)

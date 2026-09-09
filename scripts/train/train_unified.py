@@ -328,6 +328,23 @@ def build_scheduler(optimizer, base_lr, warmup_steps, total_steps):
 # training step (Phase 3 MD §1-§3)
 # ---------------------------------------------------------------------------
 
+def _sample_mask(masker, occ, ratio, surrogate=None):
+    """Sample a block mask, honoring the model's Stage-A broadcast contract.
+
+    BlockMasker.sample draws PER-SAMPLE mask placements (independent top/left
+    per batch element). MaskedQueryPredictor (Joint Target Redesign §4, Stage
+    A) requires a single mask shape broadcast across the batch, so when the
+    active model demands it we sample ONE mask (batch 1) and repeat it. The
+    per-sample mask regime arrives with Stage F; until then the broadcast is
+    the documented Stage-A contract.
+    """
+    b = occ.shape[0]
+    if b == 1:
+        return masker.sample(occ, ratio, surrogate)
+    m1 = masker.sample(occ[:1], ratio, surrogate)   # (1, grid, grid)
+    return m1.repeat(b, 1, 1)
+
+
 def training_step(model, objective, occ, sv, spec, cfg, device, step,
                   masker, rng, regime_logger, surrogate=None,
                   scalar_masker_bank=None):
@@ -368,7 +385,12 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
             "half_sensitivity masking requires the frozen surrogate")
         geo_true = assemble_metadit_geometry(
             occ, sv[:, 0], sv[:, 1], sv[:, 2])
-        M = masker.sample(geo_true, ratio, surrogate).to(device)
+        if getattr(model, "requires_broadcast_mask", False):
+            M = _sample_mask(masker, geo_true, ratio, surrogate).to(device)
+        else:
+            M = masker.sample(geo_true, ratio, surrogate).to(device)
+    elif getattr(model, "requires_broadcast_mask", False):
+        M = _sample_mask(masker, occ, ratio, surrogate).to(device)
     else:
         M = masker.sample(occ, ratio, surrogate).to(device)
 
@@ -432,8 +454,12 @@ def validate(model, objective, val_batches, cfg, device):
                 B = occ.shape[0]
                 sk = torch.ones(B, 3, dtype=torch.bool, device=device)  # all known for val
                 # Validation masks are deterministic (fixed seed) and
-                # explicitly transferred to the model device.
-                M = val_masker.sample(occ, val_mask_ratio).to(device)
+                # explicitly transferred to the model device. Honor the
+                # Stage-A broadcast contract when the model demands it.
+                if getattr(model, "requires_broadcast_mask", False):
+                    M = _sample_mask(val_masker, occ, val_mask_ratio).to(device)
+                else:
+                    M = val_masker.sample(occ, val_mask_ratio).to(device)
                 assert M.device == occ.device, (
                     "validation mask must be on the model device")
                 # The model/objective are in eval mode here, but the frozen
@@ -444,7 +470,7 @@ def validate(model, objective, val_batches, cfg, device):
                 )
                 out = result["out"]
                 mask_bool = out["mask"]
-                z_hat, z_y = out["z_hat"], out["z_y_raw"]
+                z_hat, z_y = out["z_hat"], out.get("z_y_joint", out["z_y_raw"])
 
                 # --- RAW latent space diagnostics (masked tokens only) ---
                 z_hat_m = z_hat[mask_bool]
@@ -513,6 +539,47 @@ def validate(model, objective, val_batches, cfg, device):
         out["normalized_guidance_gap"] = gap_info["normalized_guidance_gap"]
     except Exception as e:
         out["guidance_gap_error"] = str(e)
+
+    # Joint Target Redesign (docs/JOINT_TARGET_REDESIGN.md §11 conditioning
+    # diagnostics): does the TEACHER target actually depend on the spectrum?
+    # z_y_geo is identical across the two forwards (same geometry), so the
+    # real-vs-shuffled difference isolates the fusion's spectrum coupling —
+    # the redesign's central claim. At gate=0 this is exactly 0; a gate that
+    # opens without raising this metric means the fusion learned a
+    # spectrum-free delta (caught here, not claimed away).
+    fusion = getattr(model, "joint_target_fusion", None)
+    if fusion is not None:
+        out["joint_gate_tanh"] = float(torch.tanh(fusion.gate).detach())
+        try:
+            occ_v, sv_v, spec_v = val_batches[0]
+            B = occ_v.shape[0]
+            if B < 2:
+                out["target_spec_sensitivity"] = float("nan")
+                out["target_spec_sensitivity_error"] = (
+                    "shuffled control infeasible: B < 2")
+            else:
+                from runtime.physics_controls import make_shuffled_spectrum
+                diag_masker = BlockMasker(
+                    placement="random", grid=16, min_side=3, k_range=(1, 4),
+                    seed=777)
+                if getattr(model, "requires_broadcast_mask", False):
+                    Mv = _sample_mask(diag_masker, occ_v, val_mask_ratio).to(device)
+                else:
+                    Mv = diag_masker.sample(occ_v, val_mask_ratio).to(device)
+                sk_v = torch.ones(B, 3, dtype=torch.bool, device=device)
+                spec_shuf = make_shuffled_spectrum(spec_v)
+                with torch.no_grad():
+                    o_real = model(occ_v, sv_v, sk_v, spec_v, Mv,
+                                   goal_mode="real")
+                    o_shuf = model(occ_v, sv_v, sk_v, spec_shuf, Mv,
+                                   goal_mode="real")
+                sens = (o_real["z_y_joint"] - o_shuf["z_y_joint"]
+                        ).norm(dim=-1).mean()
+                scale = o_real["z_y_joint"].norm(dim=-1).mean().clamp(min=1e-8)
+                out["target_spec_sensitivity"] = float(sens)
+                out["target_spec_sensitivity_normalized"] = float(sens / scale)
+        except Exception as e:
+            out["target_spec_sensitivity_error"] = str(e)
 
     return out
 
@@ -956,8 +1023,12 @@ def preflight(cfg, device=None):
     masker = BlockMasker(placement="random", grid=16, min_side=3,
                          k_range=(1, 4), seed=42)
     # Fix 1: the mask must be on the ACTIVE device (masker.sample returns a
-    # CPU tensor; the model forward requires M.device == occ.device).
-    M = masker.sample(occ, ratio=0.5, surrogate=surrogate).to(device)
+    # CPU tensor; the model forward requires M.device == occ.device). Honor
+    # the Stage-A broadcast contract when the model demands it.
+    if getattr(model, "requires_broadcast_mask", False):
+        M = _sample_mask(masker, occ, ratio=0.5, surrogate=surrogate).to(device)
+    else:
+        M = masker.sample(occ, ratio=0.5, surrogate=surrogate).to(device)
     assert M.device == occ.device, "preflight: mask must be on the model device"
     sk = torch.zeros(b, 3, dtype=torch.bool, device=device)  # all unknown (hard stratum)
     assert sk.device == occ.device, "preflight: scalar_known must be on the model device"
@@ -1079,7 +1150,15 @@ def preflight(cfg, device=None):
         "unknown_scalar_precedence_ok": True,
     }
 
-    # Gradient ownership.
+    # Gradient ownership. The active predictor is GCLCT on the legacy line
+    # and MaskedQueryPredictor on the Joint Target Redesign line — pick the
+    # one the model actually exposes so the "predictor received gradients"
+    # guard stays meaningful on both.
+    active_predictor = getattr(model, "masked_query_predictor", None)
+    if active_predictor is None:
+        active_predictor = getattr(model, "predictor", None)
+    predictor_params = (active_predictor.parameters()
+                        if active_predictor is not None else [])
     student_grads = sum(
         1 for p in model.parameters()
         if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
@@ -1087,7 +1166,13 @@ def preflight(cfg, device=None):
         1 for p in model.geometry_decoder.parameters()
         if p.grad is not None and p.grad.abs().sum() > 0)
     predictor_grads = sum(
-        1 for p in model.predictor.parameters()
+        1 for p in predictor_params
+        if p.grad is not None and p.grad.abs().sum() > 0)
+    # Joint Target Redesign: the fusion's gate/attn parameters ARE trainable
+    # (the teacher learns through z_y_joint); confirm they received gradient.
+    fusion = getattr(model, "joint_target_fusion", None)
+    fusion_grads = sum(
+        1 for p in (fusion.parameters() if fusion is not None else [])
         if p.grad is not None and p.grad.abs().sum() > 0)
     surrogate_grads = sum(
         1 for p in surrogate.parameters() if p.grad is not None)
@@ -1103,6 +1188,7 @@ def preflight(cfg, device=None):
         "student_params_with_grad": student_grads,
         "decoder_params_with_grad": decoder_grads,
         "predictor_params_with_grad": predictor_grads,
+        "fusion_params_with_grad": fusion_grads,
         "surrogate_params_with_grad": surrogate_grads,
         "ema_params_with_grad": ema_grads,
         "scalar_mlp_ema_params_with_grad": scalar_ema_grads,
@@ -1113,6 +1199,12 @@ def preflight(cfg, device=None):
         raise RuntimeError("preflight: no student parameters received gradients")
     if decoder_grads == 0 or predictor_grads == 0:
         raise RuntimeError("preflight: decoder/predictor received no gradients")
+    if fusion is not None and fusion_grads == 0:
+        raise RuntimeError(
+            "preflight: joint_target_fusion received no gradients — the "
+            "teacher's spectrum coupling is not learning. Check that the "
+            "objective consumes z_y_joint (not z_y_raw) and that the loss "
+            "term reaching the target side is non-zero (e.g. lambda_raw>0).")
     if surrogate_grads != 0 or ema_grads != 0 or scalar_ema_grads != 0 or released_grads != 0:
         raise RuntimeError(
             f"preflight: frozen params received gradients: {ownership}")
