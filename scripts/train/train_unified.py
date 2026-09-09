@@ -904,8 +904,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             objective.train()
 
         if step % ckpt_every == 0 and step > 0:
+            ckpt_dir_name = cfg.get("checkpoint_subdir", "unified")
             ckpt_path = os.path.join(
-                REPO_ROOT, "checkpoints", "unified", "latest.pt")
+                REPO_ROOT, "checkpoints", ckpt_dir_name, "latest.pt")
             os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
             ema_state = collect_ema_state(model)
             save_checkpoint(
@@ -920,7 +921,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             print(f"  [ckpt] saved to {ckpt_path}")
 
     # Final checkpoint
-    ckpt_path = os.path.join(REPO_ROOT, "checkpoints", "unified", "final.pt")
+    ckpt_dir_name = cfg.get("checkpoint_subdir", "unified")
+    ckpt_path = os.path.join(REPO_ROOT, "checkpoints", ckpt_dir_name, "final.pt")
     os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
     ema_state = collect_ema_state(model)
     save_checkpoint(

@@ -35,6 +35,10 @@ scalar_bounds:
 
 variant: unified
 
+# Distinct checkpoint subdir so Stage-A artifacts never collide with the
+# old unified line's checkpoints/unified/ checkpoints.
+checkpoint_subdir: unified_stage_a
+
 # --- Joint Target Redesign flags (docs/JOINT_TARGET_REDESIGN.md) ---
 # joint_target: teacher target = Z_joint = J(Z_G, Z_S) (§3)
 # predictor_type: masked_query — student predicts masked tokens only (§4)
