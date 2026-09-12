@@ -78,9 +78,9 @@ subprocess.run(
     ],
     check=True,
 )
-# Prune VCS metadata: unneeded for the run and halves the output bundle
-# (which has been truncating downloads).
-shutil.rmtree(REPO / ".git", ignore_errors=True)
+# Prune VCS metadata AFTER rev-parse below (which needs .git): unneeded
+# for the run and halves the output bundle (which has been truncating
+# downloads).
 
 tip = subprocess.run(
     ["git", "rev-parse", "HEAD"],
@@ -95,6 +95,7 @@ print(f"expected tip:      {EXPECTED_TIP}", flush=True)
     f"cloned={tip}\nexpected_at_author_time={EXPECTED_TIP}\n"
 )
 mark("clone_done", f"tip={tip} expected={EXPECTED_TIP}")
+shutil.rmtree(REPO / ".git", ignore_errors=True)
 
 # 2. Install deps — skipped when the image already carries the pinned torch
 # (saves ~5 min and removes the biggest setup failure surface; verified and
