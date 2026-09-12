@@ -1,0 +1,11 @@
+{
+  "id": "akashkesav/metasurface-jepa-stage-a-full-train",
+  "title": "Metasurface JEPA Stage A Full Train (Run A, no goal)",
+  "code_file": "run_stage_a_full.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["akashkesav/metadit-aaai2026-staging"]
+}

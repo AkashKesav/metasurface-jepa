@@ -1,0 +1,176 @@
+"""Kaggle kernel: Joint Target Redesign Stage A RUN A (full-train, no goal).
+
+Operator A/B authorized 2026-09-12 (AGENTS.md Standing Rule 9).
+Run A scope: 50% block mask, scalars all known, S_goal = S_true, FULL train
+set (total_steps=70000 ~= 1 epoch at batch 2), rebalanced weights
+(lambda_raw=3.0, lambda_var=5.0, lambda_cov=1.0), goal term OFF.
+Config: configs/unified_stage_a_full.yaml (checkpoint_subdir unified_stage_a_full).
+
+Kernel flow:
+  1. Clone the docs/full-training-audit-pr branch at the pinned commit.
+  2. Install deps (requirements.txt pins torch 2.5.1 + torchvision 0.20.1).
+  3. Symlink the staging dataset's split_data/ + weights/ into data/metadit/.
+  4. Run train_unified.py with the Run-A config on cuda.
+  5. Run eval_checkpoint_latents.py on final.pt (with init baseline) so the
+     output carries a fresh PASS/FAIL verdict (no stale eval files).
+  6. Copy final/latest checkpoints + metrics + fresh eval to /kaggle/working/results.
+
+AGENTS.md Standing Rule 8: cloud GPU; local machine is code + unit tests only.
+"""
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+REPO = Path("/kaggle/working/metasurface-jepa")
+RESULTS = Path("/kaggle/working/results")
+RESULTS.mkdir(parents=True, exist_ok=True)
+
+BRANCH = "docs/full-training-audit-pr"
+FORK_URL = "https://github.com/AkashKesav/metasurface-jepa.git"
+# Pin the exact code commit this kernel was authored against. Updated at push
+# time to the commit carrying configs/unified_stage_a_full.yaml.
+EXPECTED_TIP = "d5d8197d1b39ad179571a87b07a9d781ee318dbd"
+
+# 1. Clone the pinned branch.
+if REPO.exists():
+    shutil.rmtree(REPO)
+subprocess.run(
+    [
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        f"--branch={BRANCH}",
+        FORK_URL,
+        str(REPO),
+    ],
+    check=True,
+)
+
+tip = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    cwd=REPO,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+print(f"cloned branch tip: {tip}", flush=True)
+print(f"expected tip:      {EXPECTED_TIP}", flush=True)
+(REPO / ".kernel_commit").write_text(
+    f"cloned={tip}\nexpected_at_author_time={EXPECTED_TIP}\n"
+)
+
+# 2. Install deps.
+subprocess.run(
+    ["python", "-m", "pip", "install", "-q", "-r", str(REPO / "requirements.txt")],
+    check=True,
+)
+
+# 3. Locate the staging dataset and symlink it in.
+data_root = None
+for root, _, _ in os.walk("/kaggle/input"):
+    p = Path(root)
+    if (p / "split_data" / "train_set.mat").exists() and (
+        p / "weights" / "surrogate_model.bin"
+    ).exists():
+        data_root = p
+        break
+if data_root is None:
+    raise RuntimeError("MetaDiT staging dataset not found under /kaggle/input")
+print(f"staging dataset: {data_root}", flush=True)
+
+metadit_dir = REPO / "data" / "metadit"
+metadit_dir.mkdir(parents=True, exist_ok=True)
+for name in ("split_data", "weights"):
+    link = metadit_dir / name
+    target = data_root / name
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(target)
+    print(f"symlinked {link} -> {target}", flush=True)
+
+cfg_path = REPO / "configs" / "unified_stage_a_full.yaml"
+print("config device line:", flush=True)
+for line in cfg_path.read_text().splitlines():
+    if line.strip().startswith("device:"):
+        print(f"  {line}", flush=True)
+        break
+
+# 4. Run the training (don't check=True: capture partial results on failure).
+run_env = dict(os.environ)
+run_env["PYTHONUNBUFFERED"] = "1"
+proc = subprocess.run(
+    [
+        "python",
+        str(REPO / "scripts" / "train" / "train_unified.py"),
+        "--config",
+        str(cfg_path),
+        "--device",
+        "cuda",
+    ],
+    cwd=str(REPO),
+    env=run_env,
+)
+print(f"train_unified exit code: {proc.returncode}", flush=True)
+
+# 5. Fresh offline eval of the produced final.pt (kills the stale-eval class
+# of confusion: this latent_eval.json is generated in-run, from this checkpoint).
+ckpt_dir = REPO / "checkpoints" / "unified_stage_a_full"
+final_pt = ckpt_dir / "final.pt"
+eval_proc = None
+if final_pt.exists():
+    eval_proc = subprocess.run(
+        [
+            "python",
+            str(REPO / "scripts" / "eval" / "eval_checkpoint_latents.py"),
+            "--checkpoint",
+            str(final_pt),
+            "--split",
+            "val",
+            "--batches",
+            "2",
+            "--mask-ratios",
+            "0.5",
+            "--device",
+            "cuda",
+            "--init-baseline",
+            "--out",
+            str(ckpt_dir / "latent_eval.json"),
+        ],
+        cwd=str(REPO),
+        env=run_env,
+    )
+    print(f"eval exit code: {eval_proc.returncode}", flush=True)
+else:
+    print("no final.pt produced; skipping eval", flush=True)
+
+# 6. Copy artifacts to results/.
+if ckpt_dir.exists():
+    for f in ckpt_dir.glob("*.pt"):
+        shutil.copy2(f, RESULTS / f.name)
+    for f in ckpt_dir.glob("*.json"):
+        shutil.copy2(f, RESULTS / f.name)
+
+manifest = {
+    "branch": BRANCH,
+    "cloned_tip": tip,
+    "expected_tip_at_author_time": EXPECTED_TIP,
+    "config": "configs/unified_stage_a_full.yaml",
+    "stage": "A-run-A-no-goal",
+    "active_loss_terms": [
+        "L_JEPA raw unnormalized (lambda_raw=3.0)",
+        "VICReg var (lambda_var=5.0)",
+        "VICReg cov (lambda_cov=1.0)",
+        "goal term OFF (lambda_goal=0.0)",
+    ],
+    "schedule": "total_steps=70000 (~1 epoch, batch 2), warmup=2000, val_every=500, ckpt_every=2000",
+    "gates": "scale_ratio in [0.5,2], concentration>0.01, delta_rel<1, sens_norm>0.01",
+    "train_unified_exit_code": proc.returncode,
+    "eval_exit_code": eval_proc.returncode if eval_proc is not None else None,
+    "results_files": sorted(p.name for p in RESULTS.iterdir()),
+}
+(RESULTS / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+print("=== RUN MANIFEST ===", flush=True)
+print(json.dumps(manifest, indent=2), flush=True)
