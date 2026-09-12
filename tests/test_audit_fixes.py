@@ -233,3 +233,26 @@ def test_goal_term_hinge_behavior():
         assert abs(r_shuf["components"]["L_goal_weighted"] - 2.0 * g) < 1e-9
         # Weighted goal participates in the total.
         assert r_shuf["components"]["L_total"] > 0.0
+
+
+def test_repo_text_files_utf8():
+    # Regression guard for the 2026-09-12 Run-A Kaggle outage: two configs
+    # generated via locale-encoded open() carried a cp1252 em-dash (0x97)
+    # that decoded fine on Windows but crashed yaml.safe_load on Linux,
+    # killing three cloud runs with zero logs. All first-party text files
+    # must be strict UTF-8.
+    import io
+    roots = ['configs', 'src', 'scripts', 'tests']
+    exts = ('.py', '.yaml', '.yml', '.md', '.json')
+    bad = []
+    for root in roots:
+        for dirpath, dirnames, filenames in __import__('os').walk(root):
+            dirnames[:] = [d for d in dirnames if d != '__pycache__']
+            for fn in filenames:
+                if fn.endswith(exts):
+                    p = __import__('os').path.join(dirpath, fn)
+                    try:
+                        io.open(p, 'rb').read().decode('utf-8')
+                    except UnicodeDecodeError:
+                        bad.append(p)
+    assert not bad, f'non-UTF8 text files: {bad}'
