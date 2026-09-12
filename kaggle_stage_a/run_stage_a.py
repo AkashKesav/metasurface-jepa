@@ -3,7 +3,10 @@
 docs/JOINT_TARGET_REDESIGN.md §9 Stage A + §14 step 4. The teacher target is
 Z_joint = J(Z_G, Z_S) (§3); the student predicts ONLY masked spatial tokens
 via MaskedQueryPredictor (§4). Stage-A scope: 50% block mask, scalars all
-known, S_goal = S_true, L_JEPA only (raw normalized MSE on masked tokens).
+known, S_goal = S_true, L_JEPA (lambda_raw=1.0, UNNORMALIZED scale-sensitive
+MSE) + VICReg var/cov anti-collapse (lambda_var=10, lambda_cov=1).
+Remediation for the STAGE_A_VERDICT collapse (norm_delta bound, logit-space
+scalar init, exact resume).
 
 This is the first cloud training run that exercises the joint target end to
 end. The §11 conditioning diagnostics (joint_gate_tanh,
@@ -42,7 +45,7 @@ BRANCH = "docs/full-training-audit-pr"
 FORK_URL = "https://github.com/AkashKesav/metasurface-jepa.git"
 # Pin the exact commit this kernel was authored against, so a later push to
 # the branch cannot silently change what runs.
-EXPECTED_TIP = "338f1252957b0c4e1c9812bcb7ed6afc86365fd4"
+EXPECTED_TIP = "db68cf53cd81e395282cca1c2a1f6c6f7c7931bd"
 
 # 1. Clone the pinned branch.
 if REPO.exists():
@@ -140,7 +143,11 @@ manifest = {
     "expected_tip_at_author_time": EXPECTED_TIP,
     "config": "configs/unified_stage_a.yaml",
     "stage": "A",
-    "active_loss_terms": ["L_JEPA (lambda_raw=1.0)"],
+    "active_loss_terms": [
+        "L_JEPA (lambda_raw=1.0, unnormalized MSE)",
+        "VICReg var (lambda_var=10.0)",
+        "VICReg cov (lambda_cov=1.0)",
+    ],
     "train_unified_exit_code": proc.returncode,
     "results_files": sorted(p.name for p in RESULTS.iterdir()),
 }
