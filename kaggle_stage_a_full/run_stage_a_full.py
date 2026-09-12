@@ -98,9 +98,34 @@ for line in cfg_path.read_text().splitlines():
         print(f"  {line}", flush=True)
         break
 
-# 4. Run the training (don't check=True: capture partial results on failure).
+# 4. Fail-fast preflight on the Run-A config (model build, one real sample
+# through forward+physics+backward, gradient ownership incl. fusion grads).
+# Runs BEFORE the 70k-step job so config/code errors surface in minutes with
+# a clear cause instead of an opaque mid-run ERROR with no artifacts.
 run_env = dict(os.environ)
 run_env["PYTHONUNBUFFERED"] = "1"
+preflight_proc = subprocess.run(
+    [
+        "python",
+        str(REPO / "scripts" / "train" / "train_unified.py"),
+        "--config",
+        str(cfg_path),
+        "--device",
+        "cuda",
+        "--preflight",
+    ],
+    cwd=str(REPO),
+    env=run_env,
+)
+print(f"preflight exit code: {preflight_proc.returncode}", flush=True)
+if preflight_proc.returncode != 0:
+    raise RuntimeError("preflight FAILED — refusing to start the full run")
+
+# 5. Run the training (don't check=True: capture partial results on failure).
+# stdout+stderr tee'd incrementally to RESULTS/train.log so progress survives
+# even if the run dies before its first checkpoint (PYTHONUNBUFFERED=1 above
+# keeps the child stream unbuffered).
+train_log = open(RESULTS / "train.log", "w")
 proc = subprocess.run(
     [
         "python",
@@ -112,10 +137,13 @@ proc = subprocess.run(
     ],
     cwd=str(REPO),
     env=run_env,
+    stdout=train_log,
+    stderr=subprocess.STDOUT,
 )
+train_log.close()
 print(f"train_unified exit code: {proc.returncode}", flush=True)
 
-# 5. Fresh offline eval of the produced final.pt (kills the stale-eval class
+# 6. Fresh offline eval of the produced final.pt (kills the stale-eval class
 # of confusion: this latent_eval.json is generated in-run, from this checkpoint).
 ckpt_dir = REPO / "checkpoints" / "unified_stage_a_full"
 final_pt = ckpt_dir / "final.pt"
@@ -168,6 +196,7 @@ manifest = {
     "schedule": "total_steps=70000 (~1 epoch, batch 2), warmup=2000, val_every=500, ckpt_every=2000",
     "gates": "scale_ratio in [0.5,2], concentration>0.01, delta_rel<1, sens_norm>0.01",
     "train_unified_exit_code": proc.returncode,
+    "preflight_exit_code": preflight_proc.returncode,
     "eval_exit_code": eval_proc.returncode if eval_proc is not None else None,
     "results_files": sorted(p.name for p in RESULTS.iterdir()),
 }
