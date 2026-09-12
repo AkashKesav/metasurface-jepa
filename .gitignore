@@ -50,6 +50,8 @@ kaggle_anosvol_dataset/
 .tmp_stage4_pull/
 temp_test_data/
 p2/
+# Consolidated scratch archive (6 GB, gitignored — see KAGGLE_SCRATCH_ARCHIVE.md)
+kaggle_scratch_archive_*.tar.gz
 
 # Model weights anywhere
 *.safetensors
