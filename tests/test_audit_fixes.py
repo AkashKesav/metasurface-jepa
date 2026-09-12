@@ -2,7 +2,8 @@
 
 Covers: scalar logit init, mask position equality, projector-collapse
 reachability, spectrum goal_mode validation, sigreg N<2, shuffled B<2 warning,
-guidance mode restore, FixedValidation empty-mask NaN.
+and guidance mode restore. (FixedValidation empty-mask NaN is covered by
+convention-match with eval_checkpoint_latents.py; no dedicated test here.)
 """
 
 import copy

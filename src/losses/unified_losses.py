@@ -259,6 +259,10 @@ class UnifiedJEPALoss(nn.Module):
         # Stage-A scale-free collapse documented in STAGE_A_VERDICT.md §8).
         # Unnormalized MSE enforces both direction and magnitude matching,
         # preventing the 16x magnitude mismatch previously masked by F.normalize.
+        if not bool(mask_bool.any()):
+            raise ValueError(
+                "UnifiedJEPALoss: mask contains no masked tokens — the "
+                "masked-token objective is undefined at 0% masking.")
         L_raw = F.mse_loss(z_hat_repr[mask_bool], z_y[mask_bool])
         L_raw_w = self.lambda_raw * L_raw
 
