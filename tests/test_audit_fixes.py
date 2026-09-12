@@ -256,3 +256,38 @@ def test_repo_text_files_utf8():
                     except UnicodeDecodeError:
                         bad.append(p)
     assert not bad, f'non-UTF8 text files: {bad}'
+
+
+def test_factorize_or_skip_degenerate():
+    # A batch with an occupied pixel but zero r/h scalars violates the
+    # factorize invariant (Run-A cloud crash at step ~6900). The helper must
+    # convert ONLY that AssertionError into _SkippedBatch; real bugs re-raise.
+    import sys, os
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'scripts', 'train'))
+    from train_unified import _factorize_or_skip, _SkippedBatch
+    import torch
+    G = torch.zeros(2, 3, 64, 64)
+    G[0, 1, 10, 10] = 0.5  # occupied via ch1, but ch0 amax = 0 -> r = 0
+    G[0, 2, :, :] = 2.75 / 3.0
+    G[1, 0, 20, 20] = 4.25 / 5.0
+    G[1, 1, 20, 20] = 0.75
+    G[1, 2, :, :] = 2.75 / 3.0
+    try:
+        _factorize_or_skip(G)
+    except _SkippedBatch:
+        return
+    raise AssertionError('degenerate batch must raise _SkippedBatch')
+
+
+def test_factorize_or_skip_healthy_passes():
+    import sys, os
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'scripts', 'train'))
+    from train_unified import _factorize_or_skip, _SkippedBatch
+    import torch
+    G = torch.zeros(2, 3, 64, 64)
+    G[:, 0, 10, 10] = 4.25 / 5.0
+    G[:, 1, 10, 10] = 0.75
+    G[:, 2, :, :] = 2.75 / 3.0
+    occ, sv = _factorize_or_skip(G)
+    assert occ.shape == (2, 1, 64, 64)
+    assert sv.shape == (2, 3)

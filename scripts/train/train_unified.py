@@ -345,6 +345,25 @@ def build_scheduler(optimizer, base_lr, warmup_steps, total_steps):
 # ---------------------------------------------------------------------------
 
 
+class _SkippedBatch(Exception):
+    """A batch whose samples violate the factorize invariant (non-positive
+    h/r), skipped with a counter instead of crashing the run."""
+
+
+def _factorize_or_skip(G):
+    """factorize_geometry, converting the degenerate-sample AssertionError
+    into _SkippedBatch. Matches ONLY the documented invariant message — any
+    other AssertionError re-raises (must never mask real bugs)."""
+    from data.factorize import factorize_geometry
+
+    try:
+        return factorize_geometry(G)
+    except AssertionError as e:
+        if "strictly positive" in str(e):
+            raise _SkippedBatch(str(e))
+        raise
+
+
 def _sample_mask(masker, occ, ratio, surrogate=None):
     """Sample a block mask, honoring the model's Stage-A broadcast contract.
 
@@ -910,6 +929,9 @@ def train(
         train_data = loader
 
     val_batches = []
+    # Degenerate-sample accounting lives here (before both val build and
+    # train loop use it). See train-loop init for the full comment.
+    skipped_val_samples = 0
     if use_synthetic:
         val_batches = make_synthetic_dataset(
             cfg["train"].get("val_batches", 1),
@@ -930,8 +952,16 @@ def train(
             collate_fn=collate_batch,
         )
         for G, S in vloader:
-            occ, sv = factorize_geometry(G)
+            try:
+                occ, sv = _factorize_or_skip(G)
+            except _SkippedBatch as e:
+                skipped_val_samples += 1
+                print(f"  [skip] degenerate val sample batch: {str(e)[:100]}")
+                continue
             val_batches.append((occ.to(device), sv.to(device), S.to(device)))
+        if skipped_val_samples:
+            print(f"  [skip] total degenerate val batches skipped: "
+                  f"{skipped_val_samples} (kept {len(val_batches)})")
 
     # --- resume ---
     start_step = 0
@@ -1084,6 +1114,12 @@ def train(
     t_start = time.time()
 
     last_loss = None
+    # Degenerate-sample accounting (factorize invariant: h/r strictly
+    # positive). Batches violating it skip with a counter instead of killing
+    # the run (Run-A crash at step ~6900). Reported in final_metrics.json.
+    # skipped_val_samples is initialized with the val build above.
+    skipped_train_batches = 0
+    skipped_train_steps = 0
     for step in range(start_step, total_steps):
         # Phase 4 MD §4.1: ramp lambda_phys from 0 to target over ramp steps
         if ramp_steps > 0:
@@ -1097,16 +1133,26 @@ def train(
         optimizer.zero_grad(set_to_none=True)
 
         micro_losses = []
+        last_components = None
         for _ in range(grad_accum):
-            # Get batch (auto-reset on exhaustion)
+            # Get batch (auto-reset on exhaustion). Degenerate samples
+            # (non-positive h/r, violating the factorize invariant) skip
+            # this microbatch with a counter — the Run-A full-train crash
+            # at step ~6900 was one such sample killing a 6500-step run.
             try:
                 if use_synthetic or not isinstance(train_data, DataLoader):
                     occ, sv, spec = next(data_iter)
                 else:
                     G, S = next(data_iter)
-                    occ, sv = factorize_geometry(G)
+                    occ, sv = _factorize_or_skip(G)
                     occ, sv = occ.to(device), sv.to(device)
                     spec = S.to(device)
+            except _SkippedBatch as e:
+                skipped_train_batches += 1
+                if skipped_train_batches <= 5 or skipped_train_batches % 100 == 0:
+                    print(f"  [skip] degenerate train batch #{skipped_train_batches} "
+                          f"at step {step}: {str(e)[:100]}")
+                continue
             except StopIteration:
                 data_iter = (
                     iter(train_data)
@@ -1117,7 +1163,14 @@ def train(
                     occ, sv, spec = next(data_iter)
                 else:
                     G, S = next(data_iter)
-                    occ, sv = factorize_geometry(G)
+                    try:
+                        occ, sv = _factorize_or_skip(G)
+                    except _SkippedBatch as e:
+                        skipped_train_batches += 1
+                        print(f"  [skip] degenerate train batch "
+                              f"#{skipped_train_batches} at step {step} "
+                              f"(epoch wrap): {str(e)[:100]}")
+                        continue
                     occ, sv = occ.to(device), sv.to(device)
                     spec = S.to(device)
 
@@ -1139,6 +1192,14 @@ def train(
             loss = result["total_loss"]
             (loss / grad_accum).backward()
             micro_losses.append(float(loss.detach()))
+            last_components = result["components"]
+
+        if not micro_losses or last_components is None:
+            # Entire optimizer step skipped (all microbatches degenerate):
+            # advance without stepping so scheduler/EMA stay aligned with
+            # completed updates. Counted in skipped_train_steps.
+            skipped_train_steps += 1
+            continue
 
         # Gradient clipping
         torch.nn.utils.clip_grad_norm_(
@@ -1165,7 +1226,9 @@ def train(
         )
 
         if step % log_every == 0:
-            c = result["components"]
+            c = last_components
+            # last_components is not None here: the empty-step guard above
+            # continued past this point when no microbatch completed.
             # L_phys is the RAW physics term; L_phys_weighted is
             # lambda_phys * L_phys — the actual contribution to the objective
             # (item 10: report both, never describe Phase C by the raw value
@@ -1282,6 +1345,9 @@ def train(
             "seconds_per_step": round(elapsed_total / n_steps_run, 4),
             "steps_per_second": round(n_steps_run / max(elapsed_total, 1e-9), 3),
             "steps_run": n_steps_run,
+            "skipped_train_batches": skipped_train_batches,
+            "skipped_train_steps": skipped_train_steps,
+            "skipped_val_samples": skipped_val_samples,
             "regime_report": regime_logger.report(),
         },
     )
@@ -1463,8 +1529,7 @@ def preflight(cfg, device=None):
         # precedence test (root-caused 2026-09-12: sample 0 passed by luck,
         # sample 1 failed at a masked pixel).
         up = (
-            M.view(b, 1, 16, 16).repeat_interleave(4, 2).repeat_interleave(4, 3)
-            > 0.5
+            M.view(b, 1, 16, 16).repeat_interleave(4, 2).repeat_interleave(4, 3) > 0.5
         )  # (B,1,64,64) True = visible (retained)
         occ_pixels = (occ[:, 0] > 0.5) & up[:, 0]  # (B,64,64) visible+occupied
         occ_idx = occ_pixels.nonzero()
