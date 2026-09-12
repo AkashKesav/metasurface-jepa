@@ -44,6 +44,7 @@ logs/*
 
 # Kaggle session scratch (pulled outputs, sharded checkpoints, metrics)
 .kaggle_*/
+/.kaggle_*
 kaggle_anosvol_dataset/
 .metadit_stage_*/
 .tmp_stage4_pull/
