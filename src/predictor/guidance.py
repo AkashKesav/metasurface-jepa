@@ -82,19 +82,22 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
         info: dict with raw z_hat_real/null, q_real/null, scalar_pred, and
               guidance gap scalars.
     """
+    was_training = model.training
     model.eval()
+    try:
+        # Real-goal forward
+        out_real = model(occ, sv, sk, spec, mask,
+                         goal_mode="real", with_target=False)
+        z_real = out_real["z_hat"]
+        q_real = out_real["scalar_summary_pred"]
 
-    # Real-goal forward
-    out_real = model(occ, sv, sk, spec, mask,
-                     goal_mode="real", with_target=False)
-    z_real = out_real["z_hat"]
-    q_real = out_real["scalar_summary_pred"]
-
-    # Null-goal forward
-    out_null = model(occ, sv, sk, spec, mask,
-                     goal_mode="null", with_target=False)
-    z_null = out_null["z_hat"]
-    q_null = out_null["scalar_summary_pred"]
+        # Null-goal forward
+        out_null = model(occ, sv, sk, spec, mask,
+                         goal_mode="null", with_target=False)
+        z_null = out_null["z_hat"]
+        q_null = out_null["scalar_summary_pred"]
+    finally:
+        model.train(was_training)
 
     # Combine both branches.
     z_guided = cfg_combine(z_real, z_null, w)

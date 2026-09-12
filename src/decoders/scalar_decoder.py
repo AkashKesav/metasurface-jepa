@@ -6,6 +6,8 @@ scalar positions. This head reads z_hat's scalar-summary query, NOT a latent
 target — there is no scalar EMA loss target (§3.6 EMA rules).
 """
 
+import math
+
 import torch
 from torch import nn
 
@@ -44,15 +46,22 @@ class ScalarDecoder(nn.Module):
             )
             for _ in range(n_scalars)
         ])
-        # Final layer: initialize bias to the approximate MetaDiT dataset means
-        # (l_lattice ≈ 2.75, h_atom ≈ 0.75, r_atom ≈ 4.25, from external/metadit/datapipe.py)
-        # so the initial geometry is non-zero and within the surrogate's training
-        # distribution. Zero/empty init would collapse geometry to all-zeros,
-        # and the surrogate's ReLU6 activations have zero Jacobian at zero input.
-        init_biases = [2.75, 0.75, 4.25]
+        # Final layer: initialize bias in LOGIT space so sigmoid maps back to
+        # the dataset means. raw = bias -> sigmoid(bias) must equal
+        # (mean-lo)/(hi-lo) = 0.5 for all three scalars here, i.e. bias ~= 0.
+        # Setting bias to physical means (2.75/0.75/4.25) saturates the sigmoid
+        # (e.g. sigmoid(2.75)=0.94 -> l_lattice init 2.97 near hi) and puts
+        # init geometry at the bound edge, off the surrogate distribution.
+        means = [2.75, 0.75, 4.25]
+        bounds_list = bounds.tolist()
         for i, head in enumerate(self.heads):
-            nn.init.zeros_(head[-1].weight)
-            nn.init.constant_(head[-1].bias, init_biases[i])
+            last = list(head.children())[-1]
+            assert isinstance(last, nn.Linear)
+            nn.init.zeros_(last.weight)
+            lo_i, hi_i = float(bounds_list[i][0]), float(bounds_list[i][1])
+            p = min(max((means[i] - lo_i) / (hi_i - lo_i), 1e-6), 1.0 - 1e-6)
+            assert last.bias is not None
+            nn.init.constant_(last.bias, math.log(p / (1.0 - p)))
 
     def forward(self, scalar_summary_pred):
         """scalar_summary_pred: (B, hidden) → scalars: (B, n_scalars)."""

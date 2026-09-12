@@ -24,7 +24,6 @@ no adaptive-ladder, phase, or LOSS_LADDER machinery (all removed in the repair).
 
 import json
 import os
-import random
 import subprocess
 import sys
 import tempfile
@@ -279,8 +278,11 @@ class FixedValidation:
                     goal_attns.append(w.cpu())
             # Dynamic ratio key per the hardening spec
             ratio_key = f"cos_err_r{self.ratio:g}"
+            # Empty-mask (ratio 0.0) is a valid diagnostic with zero masked
+            # tokens — report NaN, never a fake perfect 0.0 (matches
+            # eval_checkpoint_latents.py n_masked==0 convention).
             metrics = {
-                ratio_key: float(loss_sum / max(1, mask_count)),
+                ratio_key: float("nan") if mask_count == 0 else float(loss_sum / mask_count),
             }
             raw = token_space_stats(torch.cat(zy_raw, dim=0))
             proj_stats = token_space_stats(torch.cat(zy_proj, dim=0))
@@ -339,10 +341,18 @@ class FixedValidation:
         finally:
             restore_modes()
         ratio_key = f"cos_err_r{self.ratio:g}"
+        # Same empty-mask contract as _acc_stats: NaN when no masked tokens.
+        if mask_count == 0:
+            nan = float("nan")
+            return {
+                f"real_{ratio_key}": nan,
+                f"null_{ratio_key}": nan,
+                f"gap_{ratio_key}": nan,
+            }
         return {
-            f"real_{ratio_key}": float(real_sum / max(1, mask_count)),
-            f"null_{ratio_key}": float(null_sum / max(1, mask_count)),
-            f"gap_{ratio_key}": float(gap_sum / max(1, mask_count)),
+            f"real_{ratio_key}": float(real_sum / mask_count),
+            f"null_{ratio_key}": float(null_sum / mask_count),
+            f"gap_{ratio_key}": float(gap_sum / mask_count),
         }
 
 

@@ -32,6 +32,23 @@ logs/*
 
 # Root-level probe/debug scratch files (out_*.py/.json/.txt)
 /out_*
+/_audit_*
+/_fetch_log*
+/_probe_*
+/_regen_b64.py
+/_splice_kernel.py
+/_s4*
+/_local_diff.b64
+/poll_v4.py
+/k8_*
+
+# Kaggle session scratch (pulled outputs, sharded checkpoints, metrics)
+.kaggle_*/
+kaggle_anosvol_dataset/
+.metadit_stage_*/
+.tmp_stage4_pull/
+temp_test_data/
+p2/
 
 # Model weights anywhere
 *.safetensors

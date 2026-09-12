@@ -26,7 +26,8 @@ class ReleasedSpectrumEncoder(nn.Module):
     def __init__(self, checkpoint_path, device="cpu"):
         super().__init__()
         self.encoder = VanillaSpectrumEncoder()
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        # Released weights are a pure state-dict — harden pickle loading.
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         stripped = {
             k[len(CKPT_PREFIX):] if k.startswith(CKPT_PREFIX) else k: v
             for k, v in ckpt.items()
@@ -89,18 +90,24 @@ class SpectrumPath(nn.Module):
         k = k.reshape(b, nk, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.reshape(b, nk, self.num_heads, self.head_dim).transpose(1, 2)
         q, k = self.q_norm(q), self.k_norm(k)
+        w = None
         if need_weights:
             with torch.no_grad():
                 w = torch.softmax((q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim),
                                   dim=-1)                    # (B, H, 16, 301)
         out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         out = out.transpose(1, 2).reshape(b, nq, self.num_heads * self.head_dim)
-        return self.proj(out), (w if need_weights else None)
+        return self.proj(out), w
 
     def forward(self, S, goal_mode="real", need_weights=False):
         """S: (B, 2, 301) -> (c_physics (B, 384), A_goal (B, 16, 384)) — or a third
         element, the goal->spectrum attention weights (B, H, 16, 301), when
         need_weights=True."""
+        if goal_mode not in ("real", "null"):
+            raise ValueError(
+                f"SpectrumPath goal_mode must be 'real' or 'null', got {goal_mode!r}. "
+                "'shuffled' is a data-level derangement (make_shuffled_spectrum + "
+                "goal_mode='real'), not a model mode.")
         with torch.no_grad():
             a_local = self.released(S)                       # (B, 301, 256)
         if goal_mode == "null":

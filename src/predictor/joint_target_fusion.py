@@ -93,6 +93,11 @@ class JointTargetFusion(nn.Module):
         # Zero-initialized scalar gate: at construction Z_joint == Z_G exactly.
         # tanh(0) = 0 -> delta contributes nothing until training opens the gate.
         self.gate = nn.Parameter(torch.zeros(()))
+        # Stage-A remediation (STAGE_A_VERDICT §8.1): bound the physics delta
+        # so an open gate cannot swamp Z_G. norm_delta normalizes the
+        # cross-attention OUTPUT only — the residual Z_G passes through
+        # unmodified, so gate=0 still gives bit-identical Z_G.
+        self.norm_delta = nn.LayerNorm(hidden)
         # Pre-norms on the attention INPUTS only (geometry is the residual
         # stream and passes through unmodified, so at gate=0 the output is
         # bit-identical to Z_G per §3 "Initialize gate = 0 ... stable
@@ -136,9 +141,12 @@ class JointTargetFusion(nn.Module):
         v = v.reshape(b, n_s, self.num_heads, self.head_dim).transpose(1, 2)
         # SDPA: full attention (no causal/local mask — every geometry token
         # attends to every physics token). K=16 is tiny, so cost is negligible.
-        delta = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        delta = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout.p if self.training else 0.0)
         delta = delta.transpose(1, 2).reshape(b, n_g, self.hidden)
         delta = self.out_proj(delta)
+        # Bound delta scale (see __init__): LayerNorm on delta only keeps
+        # ||delta|| O(sqrt(hidden)) per token once the gate opens.
+        delta = self.norm_delta(delta)
         delta = self.dropout(delta)
         # Gated residual: at init gate=tanh(0)=0 -> z_joint == z_g exactly
         # (bit-identical to the geometry-only target — the §3 stable-init

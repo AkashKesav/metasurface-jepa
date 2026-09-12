@@ -18,18 +18,14 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
-import copy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import pytest
 
 from assembly import (
     UnifiedJEPA,
-    build_unified_model,
     saveable_state_dict,
     load_into_model,
-    SAVED_EXCLUDES,
     UNIFIED_ARCHITECTURE_ID,
 )
 from predictor.gclct import GCLCT
@@ -314,7 +310,9 @@ def test_goal_mode_real_vs_shuffled():
     occ, sv, sk, spec, M = _batch(seed=6, b=2)
     spec_shuffled = torch.roll(spec, shifts=1, dims=0)
     out_real = model(occ, sv, sk, spec, M, goal_mode="real")
-    out_shuffled = model(occ, sv, sk, spec_shuffled, M, goal_mode="shuffled")
+    # Shuffled control = deranged spectrum run through goal_mode="real"
+    # (SpectrumPath accepts only real/null; "shuffled" is data-level).
+    out_shuffled = model(occ, sv, sk, spec_shuffled, M, goal_mode="real")
     # Distinct spectra with same geometry must give distinct c_physics
     assert not torch.allclose(out_real["c_physics"], out_shuffled["c_physics"], atol=1e-6)
 
@@ -456,7 +454,9 @@ def test_loss_finite_and_backward():
     assert torch.isfinite(L), "loss must be finite"
     L.backward()
     # scalar prediction must have a gradient path
-    assert model.scalar_decoder.heads[0][-1].weight.grad is not None
+    _last = list(model.scalar_decoder.heads[0].children())[-1]
+    assert isinstance(_last, torch.nn.Linear)
+    assert _last.weight.grad is not None
 
 
 def test_loss_scalar_only_unknown():
@@ -479,17 +479,20 @@ def test_loss_scalar_only_unknown():
 # --------------------------------------------------------------------------
 
 def test_scalar_decoder_nonzero_init():
-    """ScalarDecoder final-layer bias must be nonzero (Phase 4 MD §3:
-    'needs nonzero init to produce nonzero geometry for gradient flow').
-    Zero-init collapses geometry to all-zeros, killing the surrogate's
-    Jacobian through ReLU6 dead zones. Weight is zero so the head acts
-    as a learned bias at init, with the first layer providing the latent
-    modulation."""
+    """ScalarDecoder must init to mid-range nonzero geometry (Phase 4 MD §3).
+    Zero-geometry collapses the surrogate's ReLU6 Jacobian. Weight is zero so
+    the head acts as a learned bias at init. Bias is in LOGIT space:
+    logit(0.5)=0 gives sigmoid(0)=0.5 -> mid-range means, so bias==0 is
+    correct here (old physical-mean bias saturated the sigmoid). Assert the
+    decoded OUTPUT, not the raw bias value."""
     from decoders.scalar_decoder import ScalarDecoder
     dec = ScalarDecoder(hidden=192)
     for head in dec.heads:
-        assert torch.count_nonzero(head[-1].weight).item() == 0
-        assert torch.count_nonzero(head[-1].bias).item() > 0
+        assert torch.count_nonzero(list(head.children())[-1].weight).item() == 0
+    with torch.no_grad():
+        out = dec(torch.zeros(2, 192))
+    assert torch.allclose(out[0], torch.tensor([2.75, 0.75, 4.25]), atol=0.05)
+    assert bool((out.abs() > 1e-6).all())
 
 
 def test_vicreg_supports_192d():

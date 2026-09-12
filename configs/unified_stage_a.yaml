@@ -3,17 +3,23 @@
 #
 # Stage A scope (§9 table):
 #   50% block mask, scalars all known, S_goal = S_true
-#   active loss term: L_JEPA only (raw-latent normalized MSE on masked tokens)
+#   active loss terms: L_JEPA (lambda_raw, UNNORMALIZED scale-sensitive MSE)
+#   + VICReg var/cov anti-collapse (lambda_var/cov); lambda_inv/scalar/occ/phys OFF.
+#
+# Remediation for STAGE_A_VERDICT §8: the original normalized-MSE + var/cov=0
+# run collapsed (raw_mse 235, scale_ratio 0.06, delta_rel 4.66). Unnormalized
+# L_raw makes magnitude mismatch visible; var/cov guard the projector.
 #
 # The JEPA target is Z_joint = J(Z_G, Z_S) (§3): geometry EMA latent + gated
 # spectrum cross-attention. The student predicts ONLY masked spatial tokens via
 # MaskedQueryPredictor (§4); visible positions keep the context representation.
 #
-# L_JEPA = lambda_raw * MSE(normalize(z_hat[mask]), normalize(z_y_joint[mask]))
-# — a cosine-equivalent loss on the RAW latent (§7.1: "normalized Huber or
-# cosine initially"; §11: report raw vs projected — projector-absorption risk).
-# All projected VICReg terms (L_inv/L_var/L_cov), L_occ, L_scalar, L_phys are
-# disabled (weight 0); they activate in Stages B–D.
+# L_JEPA = lambda_raw * MSE(z_hat[mask], z_y_joint[mask]) — UNNORMALIZED,
+# scale-sensitive MSE on the RAW latent (src/losses/unified_losses.py:258).
+# (§7.1: "normalized Huber or cosine initially" superseded by VERDICT §8.2:
+# normalized hid a 16x magnitude gap; §11: report raw vs projected.)
+# Projected VICReg var/cov are ON as anti-constant regularizers; L_inv, L_occ,
+# L_scalar, L_phys are disabled (weight 0); they activate in Stages B–D.
 #
 # This config is a fork of configs/unified.yaml; the only changes are the
 # Joint-Target flags, the Stage-A curriculum (single 50% mask, scalars all
@@ -59,19 +65,20 @@ spec_dim: 256
 ema_momentum_start: 0.996
 ema_momentum_end: 0.999
 
-# Loss weights — Stage A: L_JEPA only (§7.1, §9).
-# L_JEPA is the raw-latent normalized MSE path (objective's L_raw term): a
-# cosine-equivalent distance on the masked-token latents. All other terms
-# (projected VICReg invariance/variance/covariance, occupancy BCE, scalar L1,
-# physics) are disabled — they activate in Stages B–D per §9.
+# Loss weights — Stage A: L_JEPA (unnormalized) + VICReg var/cov (§8).
+# L_JEPA is the raw-latent UNNORMALIZED MSE path (objective's L_raw term):
+# scale-sensitive distance on the masked-token latents. Projected VICReg
+# variance/covariance are active anti-collapse terms; invariance, occupancy BCE,
+# scalar L1, physics are disabled — they activate in Stages B–D per §9.
+# NOTE: var/cov scale vs unnormalized MSE has not been re-tuned; watch loss magnitudes.
 loss:
-  lambda_inv: 0.0       # projected-space VICReg invariance — OFF (Stage A)
-  lambda_var: 0.0       # VICReg variance — OFF
-  lambda_cov: 0.0       # VICReg covariance — OFF
+  lambda_inv: 0.0       # projected-space VICReg invariance — OFF (Stage A, supervised via lambda_raw)
+  lambda_var: 10.0      # VICReg variance penalty — active to prevent constant token collapse
+  lambda_cov: 1.0       # VICReg covariance penalty — active to decorrelate feature dimensions
   lambda_scalar: 0.0   # scalar L1 — OFF (scalars all known in Stage A)
   lambda_occ: 0.0       # occupancy BCE — OFF (Stage B)
   lambda_phys: 0.0      # physics surrogate — OFF (Stage C)
-  lambda_raw: 1.0       # L_JEPA: raw-latent normalized MSE on masked tokens (§7.1)
+  lambda_raw: 1.0       # L_JEPA: raw-latent unnormalized MSE on masked tokens (§7.1)
   gamma: 1.0
   eps: 1.0e-4
 

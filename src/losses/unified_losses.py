@@ -255,11 +255,11 @@ class UnifiedJEPALoss(nn.Module):
         L_var_w = self.lambda_var * L_var
         L_cov_w = self.lambda_cov * L_cov
 
-        # Optional direct raw-latent alignment ablation. Keep disabled by
-        # default; activate only after raw/projected diagnostics justify it.
-        L_raw = F.mse_loss(
-            F.normalize(z_hat_repr[mask_bool], dim=-1),
-            F.normalize(z_y[mask_bool], dim=-1))
+        # Scale-sensitive unnormalized MSE on raw latents (remediation for
+        # Stage-A scale-free collapse documented in STAGE_A_VERDICT.md §8).
+        # Unnormalized MSE enforces both direction and magnitude matching,
+        # preventing the 16x magnitude mismatch previously masked by F.normalize.
+        L_raw = F.mse_loss(z_hat_repr[mask_bool], z_y[mask_bool])
         L_raw_w = self.lambda_raw * L_raw
 
         # Scalar L1 on unknown positions

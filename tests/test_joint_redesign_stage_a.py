@@ -75,22 +75,6 @@ def test_joint_fusion_zero_gate_init_has_zero_delta():
         "(physics delta is zero); stable init")
 
 
-def test_joint_fusion_gate_gradient_flows():
-    """The gate is the learnable physics-coupling control; its gradient must
-    flow from the JEPA loss through the fusion."""
-    f = JointTargetFusion(hidden=H, num_heads=6)
-    z_g = torch.randn(2, N_GEO, H, requires_grad=False)
-    z_s = torch.randn(2, N_GOAL, H, requires_grad=False)
-    z_joint = f(z_g, z_s)
-    # A loss that depends on every output element -> gradient to gate.
-    z_joint.sum().backward()
-    assert f.gate.grad is not None, "gate must receive gradient"
-    assert torch.isfinite(f.gate.grad), "gate gradient must be finite"
-    # Attention parameters must also be trainable.
-    assert f.q_proj.weight.requires_grad
-    assert f.out_proj.weight.requires_grad
-
-
 def test_joint_fusion_uses_physics_tokens_as_kv():
     """With a fixed Z_G and two different Z_S, the output must differ (the
     cross-attention keys/values come from Z_S, so the physics spectrum
@@ -107,6 +91,37 @@ def test_joint_fusion_uses_physics_tokens_as_kv():
         out2 = f(z_g, z_s2)
     assert not torch.allclose(out1, out2, atol=1e-6), (
         "different Z_S must change Z_joint (physics enters the target)")
+
+
+def test_joint_fusion_delta_bounded_by_norm():
+    """Verify that norm_delta bounds the cross-attention delta even if the
+    projection weights or inputs are arbitrarily scaled."""
+    f = JointTargetFusion(hidden=H, num_heads=6)
+    with torch.no_grad():
+        f.gate.fill_(1.0)  # open gate
+        f.out_proj.weight.mul_(1000.0)
+    z_g = torch.randn(2, N_GEO, H)
+    z_s = torch.randn(2, N_GOAL, H)
+    z_joint = f(z_g, z_s)
+    delta_contrib = z_joint - z_g
+    token_norm = delta_contrib.norm(dim=-1).mean().item()
+    assert token_norm < 20.0, f"delta contribution must be bounded by norm_delta, got {token_norm}"
+
+
+def test_joint_fusion_gate_gradient_flows():
+    """The gate is the learnable physics-coupling control; its gradient must
+    flow from the JEPA loss through the fusion."""
+    f = JointTargetFusion(hidden=H, num_heads=6)
+    z_g = torch.randn(2, N_GEO, H, requires_grad=False)
+    z_s = torch.randn(2, N_GOAL, H, requires_grad=False)
+    z_joint = f(z_g, z_s)
+    # A loss that depends on every output element -> gradient to gate.
+    z_joint.sum().backward()
+    assert f.gate.grad is not None, "gate must receive gradient"
+    assert torch.isfinite(f.gate.grad), "gate gradient must be finite"
+    # Attention parameters must also be trainable.
+    assert f.q_proj.weight.requires_grad
+    assert f.out_proj.weight.requires_grad
 
 
 def test_joint_fusion_rejects_wrong_shapes():

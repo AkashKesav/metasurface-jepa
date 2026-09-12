@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 __all__ = ["MaskedQueryPredictor"]
 
@@ -157,6 +156,12 @@ class MaskedQueryPredictor(nn.Module):
                 "MaskedQueryPredictor (Stage A) requires a single mask shape "
                 f"broadcast across the batch; got per-batch masked counts "
                 f"{n_masked_per.tolist()}. Per-sample masks arrive with Stage F.")
+        # Same count is not enough: different positions with the same count
+        # would silently mis-scatter (row-0 indices applied to all rows).
+        if not bool(torch.all(mask_b == mask_b[0].unsqueeze(0))):
+            raise NotImplementedError(
+                "MaskedQueryPredictor (Stage A) requires identical mask "
+                "positions across the batch, not just equal counts.")
         n_masked = n0
 
         # Build the masked queries: mask_token + position + scalar summary.

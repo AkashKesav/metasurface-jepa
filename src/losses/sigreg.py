@@ -51,6 +51,10 @@ def sigreg_loss(z, num_slices=8, num_points=256, t_grid=DEFAULT_T_GRID, seed=0):
     if n == 0:
         return z.new_zeros(()), {"num_slices": num_slices, "num_points": 0,
                                  "t_grid": list(t_grid), "seed": seed}
+    if n < 2:
+        raise ValueError(
+            f"sigreg requires N>=2 samples (got N={n}): single-sample std "
+            "with unbiased=True is NaN. Matches VICReg/Barlow N<2 contracts.")
     gen = torch.Generator(device=z.device)
     gen.manual_seed(seed)
     U = F.normalize(

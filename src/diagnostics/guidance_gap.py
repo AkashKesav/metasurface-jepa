@@ -38,12 +38,15 @@ def compute_guidance_gap(model, occ, sv, sk, spec, mask, device="cpu"):
             z_real_std:            float
             z_null_std:            float
     """
+    was_training = model.training
     model.eval()
-
-    out_real = model(occ, sv, sk, spec, mask,
-                     goal_mode="real", with_target=False)
-    out_null = model(occ, sv, sk, spec, mask,
-                     goal_mode="null", with_target=False)
+    try:
+        out_real = model(occ, sv, sk, spec, mask,
+                         goal_mode="real", with_target=False)
+        out_null = model(occ, sv, sk, spec, mask,
+                         goal_mode="null", with_target=False)
+    finally:
+        model.train(was_training)
 
     z_real = out_real["z_hat"]
     z_null = out_null["z_hat"]
@@ -80,9 +83,12 @@ def guidance_gap_sweep(model, occ, sv, spec, masker, ratios, device="cpu"):
     sk = torch.ones(occ.shape[0], 3, dtype=torch.bool, device=device)
     results = {}
     for ratio in ratios:
-        # Fix (CUDA mask bug): masker.sample returns CPU tensors — move to
-        # the active device before the model forward.
-        M = masker.sample(occ, ratio).to(device)
+        # Fork RNG so sweep mask sampling cannot perturb the training
+        # mask-regime stream when the caller passes the training masker.
+        with torch.random.fork_rng():
+            # Fix (CUDA mask bug): masker.sample returns CPU tensors — move to
+            # the active device before the model forward.
+            M = masker.sample(occ, ratio).to(device)
         gap_info = compute_guidance_gap(model, occ, sv, sk, spec, M, device)
         results[ratio] = gap_info["normalized_guidance_gap"]
     return results

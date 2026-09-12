@@ -31,7 +31,6 @@ if SRC_DIR not in sys.path:
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import yaml
 
 from assembly import build_unified_model, load_into_model
@@ -190,7 +189,10 @@ def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
         else:
             spec_eval = spec
 
-        out = model(occ, sv, scalar_known, spec_eval, mask, goal_mode=mode)
+        out = model(occ, sv, scalar_known, spec_eval, mask,
+                    goal_mode="real" if mode == "shuffled" else mode)
+        # NOTE: "shuffled" is a data-level derangement (spec_eval deranged)
+        # run through goal_mode="real" — SpectrumPath accepts only real/null.
         # Fix 4 (scientific deployment): binary deployed occupancy for the
         # spectrum comparison (same hard_forward rule as evaluate_scenario).
         geometry, _ = model.decode_geometry(

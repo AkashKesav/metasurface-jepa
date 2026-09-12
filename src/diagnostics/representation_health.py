@@ -39,7 +39,8 @@ COLLAPSE_CFG_DEFAULTS = {
     "p05_plus": 0.005,                 # raw/proj p05 >= healthy p05 + plus -> vote
     "same_token_plus": 0.005,          # same-token cos >= healthy + plus -> vote
     "std_div": 3.0,                    # token_std <= healthy token_std / div -> vote
-    "collapse_votes": 3,               # votes >= this -> COLLAPSED
+    "collapse_votes": 3,               # raw votes >= this -> COLLAPSED (4 signals)
+    "proj_collapse_votes": 2,          # proj votes >= this -> PROJECTOR_COLLAPSE (2 signals max)
     "near_rank": 0.05, "near_p05": 0.02, "near_same": 0.05,   # HEALTHY tolerances
 }
 
@@ -461,7 +462,9 @@ def classify_failure_mode(raw, proj, healthy_raw, healthy_proj, cfg=None,
     raw_votes, raw_sig = _raw_collapse_votes(raw, healthy_raw, c)
     proj_votes, proj_sig = _proj_collapse_votes(proj, healthy_proj, c)
     raw_collapsed = raw_votes >= c.get("collapse_votes", 3)
-    proj_collapsed = (not raw_collapsed) and proj_votes >= c.get("collapse_votes", 3)
+    # Proj path emits at most 2 signals — it needs its own threshold (default
+    # 2/2). Reusing collapse_votes=3 made PROJECTOR_COLLAPSE unreachable.
+    proj_collapsed = (not raw_collapsed) and proj_votes >= c.get("proj_collapse_votes", 2)
 
     def _base(verdict, reason, flags):
         return {"verdict": verdict, "reason": reason,

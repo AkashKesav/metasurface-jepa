@@ -233,7 +233,8 @@ class GoalConditionedJEPA(_JEPAForwardMixin, nn.Module):
 
 
 def load_released_metadit_state_dict(weights_path):
-    return torch.load(weights_path, map_location="cpu")
+    # Released weights are pure state-dicts — harden against untrusted pickle.
+    return torch.load(weights_path, map_location="cpu", weights_only=True)
 
 
 def init_geometry_from_metadit(model, metadit_weights, blocks_to_take=6):

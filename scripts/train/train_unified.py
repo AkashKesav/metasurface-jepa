@@ -40,18 +40,18 @@ import yaml
 from torch.utils.data import DataLoader
 
 from data.dataset import MetaDiTDataset, collate_batch
-from data.factorize import factorize_geometry, assemble_geometry
+from data.factorize import factorize_geometry
 from data.mask import BlockMasker
-from assembly import build_unified_model, load_into_model, set_spectrum_path
+from assembly import build_unified_model
 from predictor.guidance import goal_dropout
-from physics.physics_loop import load_surrogate, physics_loss
+from physics.physics_loop import load_surrogate
 from losses.unified_losses import (
     UnifiedJEPALoss,
     occupancy_reconstruction_metrics,
 )
-from runtime.reproducibility import set_seed, collect_rng_state, restore_rng_state
+from runtime.reproducibility import set_seed
 from runtime.device import resolve_device
-from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
+from train.engine import save_checkpoint, load_checkpoint, collect_ema_state, restore_ema_state
 
 
 def _ensure_spectrum_weights(path, device, allow_dummy=False):
@@ -641,7 +641,6 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             spectrum weights allowed. Real mode (default) requires the real
             dataset and released weights and fails loudly if they are missing.
     """
-    from train.engine import collect_ema_state
 
     set_seed(cfg["train"].get("seed", 42))
     device = device or resolve_device(cfg["train"].get("device", "cpu"))
@@ -661,7 +660,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     print(f"VAL SPLIT: {val_split}")
     print(f"SPECTRUM ENCODER: {spec_path}")
     print(f"SURROGATE: {surr_path}")
-    print(f"ARCHITECTURE ID: unified_occ_param_spectrum_jepa_v1")
+    print("ARCHITECTURE ID: unified_occ_param_spectrum_jepa_v1")
 
     # --- strict real-data requirement (Fix 5) ---
     if not use_synthetic_smoke:
@@ -808,6 +807,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
     # --- resume ---
     start_step = 0
+    resumed_curriculum_rng_state = None
     if resume_path and os.path.exists(resume_path):
         print(f"Resuming from {resume_path}")
         ckpt = load_checkpoint(
@@ -817,12 +817,27 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         # Resume at step+1 so a checkpoint saved at step 1499 resumes at step
         # 1500 (the next un-run step), not re-running step 1499.
         start_step = ckpt.get("step", -1) + 1
+        # Exact-resume: restore EMA counters + weights (load_checkpoint does
+        # NOT do this — model weights ride inside "model" but ema_state
+        # counters would otherwise restart from config).
+        restore_ema_state(model, ckpt.get("ema_state", {}))
         # Fix 3: restore the persistent scalar-masker RNG state so resumed
         # training continues the same scalar-masking sequence (not restarting
         # from seed).
         restore_scalar_masker_bank_state(
             scalar_masker_bank, ckpt.get("scalar_masker_rng_state", {}))
+        # Curriculum RNG (mask-ratio / scalar-regime / goal-dropout stream):
+        # restore when present, else restart from seed with a loud warning.
+        resumed_curriculum_rng_state = ckpt.get("curriculum_rng_state", None)
+        if resumed_curriculum_rng_state is None:
+            print("[checkpoint] WARNING: no curriculum_rng_state in checkpoint "
+                  "(legacy) — mask-regime sequence restarts from seed; "
+                  "resume is step/EMA-exact but curriculum-approximate.")
         print(f"Resumed at step {start_step}")
+    # NOTE (resume exactness): the training DataLoader uses shuffle=True with
+    # no deterministic sampler, so batch ORDER across a resume boundary is
+    # approximate even when step/EMA/curriculum-RNG are exact. Full data-order
+    # determinism is deferred (requires a seeded sampler + position tracking).
 
     # --- no-train smoke ---
     if no_train:
@@ -857,7 +872,13 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     # --- training loop ---
     model.train()
     objective.train()
-    rng = torch.Generator().manual_seed(cfg["train"].get("seed", 42))
+    # Curriculum RNG: restore across resume so mask-ratio / scalar-regime /
+    # goal-dropout sequence continues instead of restarting from seed.
+    rng = torch.Generator()
+    if resumed_curriculum_rng_state is not None:
+        rng.set_state(resumed_curriculum_rng_state)
+    else:
+        rng.manual_seed(cfg["train"].get("seed", 42))
     regime_logger = RegimeLogger(cfg)
     batch_size = train_cfg.get("batch_size", 2)
     grad_accum = train_cfg.get("grad_accum", 1)
@@ -1000,7 +1021,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                 health={}, ema_state=ema_state,
                 masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
                 extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
-                    scalar_masker_bank)},
+                    scalar_masker_bank), "curriculum_rng_state": rng.get_state()},
                 device=device, artifact_type="latest")
             print(f"  [ckpt] saved to {ckpt_path}")
 
@@ -1018,7 +1039,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         health={}, ema_state=ema_state,
         masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
         extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
-            scalar_masker_bank)},
+            scalar_masker_bank), "curriculum_rng_state": rng.get_state()},
         device=device, artifact_type="final")
 
     # Flush the metric history one last time and drop a manifest beside the

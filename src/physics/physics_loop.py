@@ -28,7 +28,6 @@ if METADIT_SRC not in sys.path:
 
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
 
 
 def load_surrogate(path, device="cpu"):
@@ -41,7 +40,8 @@ def load_surrogate(path, device="cpu"):
     """
     from model.surrogate import surrogate_s3
     m = surrogate_s3()
-    ckpt = torch.load(path, map_location="cpu")
+    # Released surrogate weights are a pure state-dict — harden pickle loading.
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(ckpt, dict) and "prediction" not in ckpt:
         # Could be a raw state_dict or a checkpoint dict
         m.load_state_dict(ckpt, strict=True)
@@ -215,9 +215,13 @@ def surrogate_gradient_test(model, surrogate, occ, sv, spec, mask, device="cpu")
 
     model.zero_grad(set_to_none=True)
 
-    # Verify surrogate params have NO gradient (must stay frozen)
-    surr_frozen = all(p.grad is None
-                      for p in surrogate.parameters() if not p.requires_grad)
+    # Verify surrogate params are frozen AND gradient-free. The old check
+    # (grad is None for params with requires_grad=False) was vacuous — frozen
+    # params never accumulate grad, so it passed even if the surrogate had
+    # been accidentally unfrozen elsewhere.
+    surr_frozen = all(not p.requires_grad for p in surrogate.parameters()) and all(
+        p.grad is None for p in surrogate.parameters()
+    )
     return has_grad and surr_frozen
 
 

@@ -4,6 +4,8 @@ Canonical real/null/shuffled-spectrum controls with derangement for shuffled.
 Canonical metric names for consistent reporting across evaluators.
 """
 
+import warnings
+
 import torch
 from runtime.device import resolve_device, assert_tensor_device
 
@@ -101,6 +103,10 @@ def make_shuffled_spectrum(S: torch.Tensor, generator: torch.Generator | None = 
     """
     b = S.shape[0]
     if b < 2:
+        warnings.warn(
+            "shuffled control infeasible for B<2: returning identity; "
+            "gap_shuffled/sensitivity_shuffled at B<2 are infeasible, not zero.",
+            UserWarning, stacklevel=2)
         return S  # preserved existing B<2 behavior: no derangement possible
     return derange_batch_tensor(S, generator=generator, seed=seed)
 
@@ -144,7 +150,7 @@ def compute_physics_metrics(model, G, S, M, objective=None, projector=None,
     M = M.to(device, non_blocking=True)
 
     # Verify device contract (Bug #17)
-    from runtime.device import assert_module_device, assert_tensor_device
+    from runtime.device import assert_module_device
     assert_module_device(model, device, "model")
     if objective is not None:
         assert_module_device(objective, device, "objective")
