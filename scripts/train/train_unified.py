@@ -1453,13 +1453,27 @@ def preflight(cfg, device=None):
     with torch.no_grad():
         wrong_pred = torch.full_like(out["scalar_pred"], 999.0)
 
-        # Locate an occupied pixel per sample from the true occupancy.
-        occ_pixels = occ[:, 0] > 0.5  # (B, 64, 64)
+        # Locate probe pixels per sample from TRUE-occupied positions that are
+        # ALSO visible in M. Visible-pixel retention guarantees
+        # occ_for_assembly == true occupancy there, so the hard-assembly
+        # support is deterministic and the read value isolates the scalar
+        # precedence rule. Probing a masked pixel would instead read the
+        # untrained decoder's coin-flip hard occupancy (0 renders the channel
+        # 0 regardless of which scalar was substituted) — a luck test, not a
+        # precedence test (root-caused 2026-09-12: sample 0 passed by luck,
+        # sample 1 failed at a masked pixel).
+        up = (
+            M.view(b, 1, 16, 16).repeat_interleave(4, 2).repeat_interleave(4, 3)
+            > 0.5
+        )  # (B,1,64,64) True = visible (retained)
+        occ_pixels = (occ[:, 0] > 0.5) & up[:, 0]  # (B,64,64) visible+occupied
         occ_idx = occ_pixels.nonzero()
-        assert occ_idx.shape[0] >= b, (
-            "preflight: each sample needs at least one occupied pixel for "
-            "h/r precedence verification"
-        )
+        for i in range(b):
+            if int((occ_idx[:, 0] == i).sum()) == 0:
+                raise RuntimeError(
+                    "preflight: sample {i} has no visible occupied pixel for "
+                    "h/r precedence verification (mask hides all support)."
+                )
 
         # KNOWN case: all scalars known → assembly must use scalar_values.
         sk_known = torch.ones(b, 3, dtype=torch.bool, device=device)

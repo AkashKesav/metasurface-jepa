@@ -22,7 +22,15 @@ approved archiving on 2026-09-12.
 - `kaggle_test_suite/kernel-metadata.json` (untracked kernel source; `git add` it
   if the test-suite kernel is wanted).
 
-## Archived (63 entries, see tarball listing)
+## Archived (63 entries, see tarball listing) — CORRECTION 2026-09-12
+
+`.metadit_stage_20260903/` was NOT scratch: `data/metadit/split_data` is a
+symlink into `.metadit_stage_20260903/metasurface-jepa/data/metadit/split_data`,
+so deleting it dangled the live dataset link (caught by a local real-data run
+refusing to start). The `split_data/` subtree (1.5 GB: train/val/test .mat)
+was restored from this tarball back to its original location; the tarball copy
+is now backup-only. Never delete `.metadit_stage_20260903/` again without
+re-homing that symlink first.
 
 Pulled outputs (`.kaggle_compare_*`, `.kaggle_goal*`, `.kaggle_stage4*`,
 `.kaggle_sweep_*`, `.kaggle_unified_*`, `.kaggle_selected_*`, `.kaggle_raw_*`,
