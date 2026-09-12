@@ -22,11 +22,28 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+import traceback
 from pathlib import Path
 
 REPO = Path("/kaggle/working/metasurface-jepa")
 RESULTS = Path("/kaggle/working/results")
 RESULTS.mkdir(parents=True, exist_ok=True)
+
+
+def _fatal_hook(exc_type, exc, tb):
+    # Persist ANY uncaught exception: Kaggle's log is unreachable from the
+    # API, so without this a crash leaves zero evidence (the v1 mystery:
+    # COMPLETE status with only .kernel_commit and no markers).
+    try:
+        (RESULTS / "_FATAL_.txt").write_text(
+            "".join(traceback.format_exception(exc_type, exc, tb))[-8000:]
+        )
+    finally:
+        sys.__excepthook__(exc_type, exc, tb)
+
+
+sys.excepthook = _fatal_hook
 
 _stage_n = 0
 
@@ -61,6 +78,9 @@ subprocess.run(
     ],
     check=True,
 )
+# Prune VCS metadata: unneeded for the run and halves the output bundle
+# (which has been truncating downloads).
+shutil.rmtree(REPO / ".git", ignore_errors=True)
 
 tip = subprocess.run(
     ["git", "rev-parse", "HEAD"],
@@ -76,21 +96,35 @@ print(f"expected tip:      {EXPECTED_TIP}", flush=True)
 )
 mark("clone_done", f"tip={tip} expected={EXPECTED_TIP}")
 
-# 2. Install deps.
-subprocess.run(
-    ["python", "-m", "pip", "install", "-q", "-r", str(REPO / "requirements.txt")],
-    check=True,
-)
-_torch_ver = subprocess.run(
+# 2. Install deps — skipped when the image already carries the pinned torch
+# (saves ~5 min and removes the biggest setup failure surface; verified and
+# recorded in the marker either way).
+_have = subprocess.run(
     [
         "python",
         "-c",
         "import torch; print(torch.__version__, torch.cuda.is_available())",
     ],
-    check=True,
     capture_output=True,
     text=True,
 ).stdout.strip()
+if _have.startswith("2.5.1"):
+    _torch_ver = _have + " (pip skipped, pinned version present)"
+else:
+    subprocess.run(
+        ["python", "-m", "pip", "install", "-q", "-r", str(REPO / "requirements.txt")],
+        check=True,
+    )
+    _torch_ver = subprocess.run(
+        [
+            "python",
+            "-c",
+            "import torch; print(torch.__version__, torch.cuda.is_available())",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 mark("deps_done", f"torch={_torch_ver}")
 
 # 3. Locate the staging dataset and symlink it in.
