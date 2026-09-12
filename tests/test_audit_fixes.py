@@ -15,6 +15,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 import torch
+import torch.nn as nn
 
 from decoders.scalar_decoder import ScalarDecoder
 from diagnostics.guidance_gap import compute_guidance_gap
@@ -79,8 +80,6 @@ def test_projector_collapse_reachable():
 
 
 def test_spectrum_path_rejects_bad_goal_mode():
-    import torch.nn as nn
-
     class DummyRel(nn.Module):
         def forward(self, S):
             return torch.randn(S.shape[0], 301, 256)
@@ -131,3 +130,106 @@ def test_guidance_gap_restores_train_mode():
         torch.ones(2, 16, 16),
     )
     assert fm.training is True
+
+
+def _tiny_goal_model():
+    # Local imports: module-level `assembly` import is stripped by the repo
+    # linter (unresolvable first-party at lint time), so import here.
+    from assembly import UnifiedJEPA
+    from data.mask import BlockMasker
+
+    torch.manual_seed(0)
+    model = UnifiedJEPA(hidden=192, num_heads=6, geo_depth=2, predictor_depth=2)
+
+    class _StubRel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Sequential(nn.Linear(2, 64), nn.GELU(), nn.Linear(64, 256))
+
+        def forward(self, S):
+            return self.net(S.transpose(1, 2))
+
+    stub = _StubRel()
+    for p in stub.parameters():
+        p.requires_grad_(False)
+    stub.eval()
+    model.spectrum_path.released = stub  # type: ignore[assignment]  # test stub
+    model.ema.target.load_state_dict(model.occupancy_encoder.state_dict())
+    model.scalar_mlp_ema.target.load_state_dict(model.scalar_encoder.state_dict())
+    occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
+    sv = torch.tensor([[2.75, 0.75, 4.25], [2.75, 0.75, 4.25]])
+    sk = torch.ones(2, 3, dtype=torch.bool)
+    spec = torch.randn(2, 2, 301)
+    masker = BlockMasker(
+        placement="random", grid=16, min_side=3, k_range=(1, 4), seed=0
+    )
+    M = masker.sample(occ, ratio=0.5)
+    return model, occ, sv, sk, spec, M
+
+
+def test_goal_term_off_by_default():
+    from losses.unified_losses import UnifiedJEPALoss
+
+    obj = UnifiedJEPALoss(hidden=192)
+    assert obj.lambda_goal == 0.0
+    model, occ, sv, sk, spec, M = _tiny_goal_model()
+    model.eval()
+    with torch.no_grad():
+        r = obj(model, occ, sv, sk, spec, M, goal_mode="real", compute_physics=False)
+    assert r["components"]["L_goal"] == 0.0
+    assert r["components"]["L_goal_weighted"] == 0.0
+
+
+def test_goal_term_requires_shuffled():
+    from losses.unified_losses import UnifiedJEPALoss
+
+    obj = UnifiedJEPALoss(hidden=192, lambda_goal=2.0, goal_margin=0.01)
+    model, occ, sv, sk, spec, M = _tiny_goal_model()
+    model.eval()
+    try:
+        with torch.no_grad():
+            obj(model, occ, sv, sk, spec, M, goal_mode="real", compute_physics=False)
+    except ValueError:
+        return
+    raise AssertionError("lambda_goal>0 without spectrum_shuf must raise")
+
+
+def test_goal_term_hinge_behavior():
+    from losses.unified_losses import UnifiedJEPALoss
+
+    obj = UnifiedJEPALoss(hidden=192, lambda_goal=2.0, goal_margin=0.01)
+    model, occ, sv, sk, spec, M = _tiny_goal_model()
+    model.eval()
+    with torch.no_grad():
+        # Identical control -> zero sensitivity -> hinge pays full margin.
+        r_same = obj(
+            model,
+            occ,
+            sv,
+            sk,
+            spec,
+            M,
+            goal_mode="real",
+            compute_physics=False,
+            spectrum_shuf=spec.clone(),
+        )
+        assert abs(r_same["components"]["L_goal"] - 0.01) < 1e-6
+        assert abs(r_same["components"]["L_goal_weighted"] - 0.02) < 1e-6
+        # Deranged control -> bounded hinge in [0, margin].
+        shuf = spec[torch.tensor([1, 0])]
+        r_shuf = obj(
+            model,
+            occ,
+            sv,
+            sk,
+            spec,
+            M,
+            goal_mode="real",
+            compute_physics=False,
+            spectrum_shuf=shuf,
+        )
+        g = r_shuf["components"]["L_goal"]
+        assert 0.0 <= g <= 0.01
+        assert abs(r_shuf["components"]["L_goal_weighted"] - 2.0 * g) < 1e-9
+        # Weighted goal participates in the total.
+        assert r_shuf["components"]["L_total"] > 0.0

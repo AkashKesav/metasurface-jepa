@@ -1,0 +1,121 @@
+# Unified JEPA — Joint Target Redesign, Stage A RUN B (full-train + goal).
+# Operator A/B authorized 2026-09-12 (AGENTS.md Standing Rule 9). Launches ONLY
+# after Run A is evaluated (same code base, same schedule; the ONLY delta is
+# the goal term below).
+#
+# Goal term: student real-vs-shuffled margin loss
+#   L_goal = relu(goal_margin - mean||z_hat(S)-z_hat(S_shuf)||[mask]),
+# lambda_goal=2.0, goal_margin=0.01 (retired plan recorded values, re-implemented
+# as opt-in UnifiedJEPALoss term, default off). Shuffled spectrum deranged
+# deterministically per step (seed+step; B>=2 enforced, resume-exact).
+# Win rule (pre-registered): keep the goal term ONLY if Run B beats Run A on
+# target_spec_sensitivity_normalized past 0.01 WITHOUT regressing scale /
+# concentration / delta_rel gates or raw_mse vs Run A.
+#
+scalar_convention:
+  parameter_order:
+  - l_lattice
+  - h_atom
+  - r_atom
+  parameter_index_in_dataset:
+  - 0
+  - 1
+  - 2
+  broadcast_channel:
+    l_lattice:
+      channel: 2
+      divisor: 3.0
+      dense: true
+    h_atom:
+      channel: 1
+      divisor: 1.0
+      dense: false
+    r_atom:
+      channel: 0
+      divisor: 5.0
+      dense: false
+  factorized_scalar_representation: raw physical values (not rescaled)
+scalar_bounds:
+  l_lattice:
+  - 2.5
+  - 3.0
+  h_atom:
+  - 0.5
+  - 1.0
+  r_atom:
+  - 3.5
+  - 5.0
+variant: unified
+checkpoint_subdir: unified_stage_b_goal
+joint_target: true
+predictor_type: masked_query
+mq_predictor_layers: 2
+hidden: 192
+num_heads: 6
+geo_depth: 6
+predictor_depth: 8
+goal_tokens: 16
+num_predictor_heads: 6
+scalar_hidden: 128
+n_film_blocks: 6
+spec_dim: 256
+ema_momentum_start: 0.996
+ema_momentum_end: 0.999
+loss:
+  lambda_inv: 0.0
+  lambda_var: 5.0
+  lambda_cov: 1.0
+  lambda_scalar: 0.0
+  lambda_occ: 0.0
+  lambda_phys: 0.0
+  lambda_raw: 3.0
+  gamma: 1.0
+  eps: 0.0001
+  lambda_goal: 2.0
+  goal_margin: 0.01
+curriculum:
+  train_mask_ratios:
+  - 0.5
+  train_mask_ratio_probs:
+  - 1.0
+  eval_mask_ratios:
+  - 0.0
+  - 0.5
+  - 1.0
+  mask_placement: random
+  scalar_regimes:
+  - all_known
+  scalar_regime_probs:
+  - 1.0
+  easy_mask_ratio: 0.0
+  hard_mask_ratio: 1.0
+staging:
+  phase: B
+  lambda_phys_ramp_steps: 0
+  physics_use_ste: true
+weights:
+  spectrum: data/metadit/weights/spec_encoder.pth
+  metadit: data/metadit/weights/metadit-small.bin
+  surrogate: data/metadit/weights/surrogate_model.bin
+data:
+  train_split: data/metadit/split_data/train_set.mat
+  val_split: data/metadit/split_data/val_set.mat
+  max_train_samples: 0
+  num_workers: 0
+  use_synthetic: false
+train:
+  batch_size: 2
+  grad_accum: 1
+  epochs: 1
+  lr: 0.0003
+  wd: 0.0001
+  warmup_steps: 2000
+  total_steps: 70000
+  val_every_steps: 500
+  log_every_steps: 50
+  ckpt_every_steps: 2000
+  clip_grad_norm: 1.0
+  seed: 42
+  val_batches: 2
+  device: cuda
+  guidance_dropout: 0.0

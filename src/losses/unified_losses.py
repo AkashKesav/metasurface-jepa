@@ -116,9 +116,12 @@ def _pixel_mask_from_token_mask(mask, target):
     if mask.ndim == 3:
         mask = mask.unsqueeze(1)
     if mask.ndim != 4:
-        raise ValueError(f"token mask must be [B,H,W] or [B,1,H,W], got {tuple(mask.shape)}")
+        raise ValueError(
+            f"token mask must be [B,H,W] or [B,1,H,W], got {tuple(mask.shape)}"
+        )
     visible = F.interpolate(
-        mask.to(dtype=target.dtype), size=target.shape[-2:], mode="nearest")
+        mask.to(dtype=target.dtype), size=target.shape[-2:], mode="nearest"
+    )
     return (1.0 - visible).clamp(0.0, 1.0)
 
 
@@ -130,8 +133,7 @@ def occupancy_reconstruction_loss(occupancy_logits, occupancy_target, mask=None)
     """
     target = occupancy_target.to(dtype=occupancy_logits.dtype)
     pixel_mask = _pixel_mask_from_token_mask(mask, target)
-    bce = F.binary_cross_entropy_with_logits(
-        occupancy_logits, target, reduction="none")
+    bce = F.binary_cross_entropy_with_logits(occupancy_logits, target, reduction="none")
     return (bce * pixel_mask).sum() / pixel_mask.sum().clamp(min=1.0)
 
 
@@ -176,16 +178,40 @@ class UnifiedJEPALoss(nn.Module):
     """
 
     name = "unified_jepa"
-    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys", "L_raw")
+    term_names = (
+        "L_inv",
+        "L_var",
+        "L_cov",
+        "L_scalar",
+        "L_occ",
+        "L_phys",
+        "L_raw",
+        "L_goal",
+    )
 
-    def __init__(self, hidden=192, lambda_inv=25.0, lambda_var=25.0,
-                 lambda_cov=1.0, lambda_scalar=1.0, lambda_occ=1.0,
-                 lambda_phys=0.0, lambda_raw=0.0,
-                 gamma=1.0, eps=1e-4, scalar_loss_type="l1",
-                 surrogate=None, physics_use_ste=True):
+    def __init__(
+        self,
+        hidden=192,
+        lambda_inv=25.0,
+        lambda_var=25.0,
+        lambda_cov=1.0,
+        lambda_scalar=1.0,
+        lambda_occ=1.0,
+        lambda_phys=0.0,
+        lambda_raw=0.0,
+        lambda_goal=0.0,
+        goal_margin=0.01,
+        gamma=1.0,
+        eps=1e-4,
+        scalar_loss_type="l1",
+        surrogate=None,
+        physics_use_ste=True,
+    ):
         super().__init__()
         self.projector = VICRegProjector(
-            input_dim=hidden, hidden_dim=hidden, output_dim=hidden,
+            input_dim=hidden,
+            hidden_dim=hidden,
+            output_dim=hidden,
         )
         self.lambda_inv = lambda_inv
         self.lambda_var = lambda_var
@@ -194,6 +220,16 @@ class UnifiedJEPALoss(nn.Module):
         self.lambda_occ = lambda_occ
         self.lambda_phys = lambda_phys
         self.lambda_raw = lambda_raw
+        # Goal-requirement margin loss (2026-09-12 operator A/B; default OFF).
+        # Hinge on the student's real-vs-shuffled sensitivity:
+        #   L_goal = relu(margin - mean||z_hat(S) - z_hat(S_shuf)||[mask])
+        # encouraging the prediction to move with the goal spectrum by at least
+        # `margin`. Hyperparameters reuse the retired plan's recorded values
+        # (lambda_goal=2.0, margin=0.01). The shuffled spectrum is supplied by
+        # the caller (training_step deranges deterministically per step); when
+        # lambda_goal>0 and no shuffled spectrum is given, fail loudly.
+        self.lambda_goal = lambda_goal
+        self.goal_margin = goal_margin
         self.gamma = gamma
         self.eps = eps
         self.surrogate = surrogate  # frozen MetaDiT EM surrogate (Phase 4)
@@ -211,9 +247,19 @@ class UnifiedJEPALoss(nn.Module):
         self.scalar_loss = ScalarPredictionLoss(loss_type=scalar_loss_type)
         self.physics_loss = PhysicsSpectrumLoss()
 
-    def forward(self, model, occupancy, scalar_values, scalar_known,
-                spectrum, mask, goal_mode="real", compute_physics=None,
-                physics_hard_forward=False):
+    def forward(
+        self,
+        model,
+        occupancy,
+        scalar_values,
+        scalar_known,
+        spectrum,
+        mask,
+        goal_mode="real",
+        compute_physics=None,
+        physics_hard_forward=False,
+        spectrum_shuf=None,
+    ):
         """Evaluate the objective.
 
         ``compute_physics`` controls whether the frozen surrogate is evaluated;
@@ -221,12 +267,20 @@ class UnifiedJEPALoss(nn.Module):
         compute the real physics term while the model is in eval mode.  The
         default retains the inexpensive historical behavior: physics is
         computed automatically during training only when it is weighted on.
+
+        ``spectrum_shuf`` is the deranged-goal control for the opt-in goal
+        margin loss (``lambda_goal > 0``). Required in that case; ignored
+        (no second forward) when the goal term is off.
         """
         if compute_physics is None:
             compute_physics = bool(model.training and self.lambda_phys > 0)
         out = model(
-            occupancy, scalar_values, scalar_known, spectrum,
-            mask, goal_mode=goal_mode,
+            occupancy,
+            scalar_values,
+            scalar_known,
+            spectrum,
+            mask,
+            goal_mode=goal_mode,
         )
         mask_bool = out["mask"]
         z_hat = out["z_hat"]
@@ -249,7 +303,8 @@ class UnifiedJEPALoss(nn.Module):
 
         # JEPA (invariance) + VICReg (var + cov) on masked tokens
         L_inv, L_var, L_cov = vicreg_branch_terms(
-            p_hat, p_y, gamma=self.gamma, eps=self.eps)
+            p_hat, p_y, gamma=self.gamma, eps=self.eps
+        )
 
         L_inv_w = self.lambda_inv * L_inv
         L_var_w = self.lambda_var * L_var
@@ -262,22 +317,24 @@ class UnifiedJEPALoss(nn.Module):
         if not bool(mask_bool.any()):
             raise ValueError(
                 "UnifiedJEPALoss: mask contains no masked tokens — the "
-                "masked-token objective is undefined at 0% masking.")
+                "masked-token objective is undefined at 0% masking."
+            )
         L_raw = F.mse_loss(z_hat_repr[mask_bool], z_y[mask_bool])
         L_raw_w = self.lambda_raw * L_raw
 
         # Scalar L1 on unknown positions
-        L_scalar = self.scalar_loss(
-            out["scalar_pred"], scalar_values, scalar_known)
+        L_scalar = self.scalar_loss(out["scalar_pred"], scalar_values, scalar_known)
 
         # Occupancy BCE is the direct supervision for the decoded occupancy.
         # It is restricted to hidden pixels so visible-pixel retention remains
         # an inference contract rather than a shortcut in the loss.
         L_occ = occupancy_reconstruction_loss(
-            out["occupancy_logits"], occupancy, mask=mask)
+            out["occupancy_logits"], occupancy, mask=mask
+        )
         L_occ_w = self.lambda_occ * L_occ
         occ_metrics = occupancy_reconstruction_metrics(
-            out["occupancy_logits"], occupancy)
+            out["occupancy_logits"], occupancy
+        )
 
         # Physics loss: decode geometry → surrogate → spectrum error (Phase 4 MD §4).
         # Reuses the ALREADY-COMPUTED out (z_hat/scalar_pred) via
@@ -286,33 +343,84 @@ class UnifiedJEPALoss(nn.Module):
         # to the single authoritative physics implementation.
         if compute_physics and self.lambda_phys > 0 and self.surrogate is not None:
             from physics.physics_loop import physics_loss_from_out
-            L_phys, _, _ = physics_loss_from_out(
-                model, out, self.surrogate, occupancy, scalar_values,
-                scalar_known, spectrum, mask, loss_type="smooth_l1",
-                use_ste=self.physics_use_ste, normalize=True,
-                hard_forward=physics_hard_forward)
-        else:
-            L_phys = self.physics_loss(
-                out.get("spectrum_target", spectrum), spectrum)
 
-        total = (L_inv_w + L_var_w + L_cov_w
-                 + self.lambda_scalar * L_scalar
-                 + L_occ_w
-                 + self.lambda_phys * L_phys
-                 + L_raw_w)
+            L_phys, _, _ = physics_loss_from_out(
+                model,
+                out,
+                self.surrogate,
+                occupancy,
+                scalar_values,
+                scalar_known,
+                spectrum,
+                mask,
+                loss_type="smooth_l1",
+                use_ste=self.physics_use_ste,
+                normalize=True,
+                hard_forward=physics_hard_forward,
+            )
+        else:
+            L_phys = self.physics_loss(out.get("spectrum_target", spectrum), spectrum)
+
+        # Goal-requirement margin loss (opt-in, default OFF). Second student
+        # forward under the deranged goal; hinge encourages the masked-token
+        # prediction to move with the goal by at least `goal_margin`.
+        if self.lambda_goal > 0:
+            if spectrum_shuf is None:
+                raise ValueError(
+                    "UnifiedJEPALoss: lambda_goal>0 requires spectrum_shuf "
+                    "(deranged goal control) — refusing to train a goal term "
+                    "with no counterfactual."
+                )
+            out_shuf = model(
+                occupancy,
+                scalar_values,
+                scalar_known,
+                spectrum_shuf,
+                mask,
+                goal_mode="real",
+                with_target=False,
+            )
+            z_hat_shuf = out_shuf.get("z_hat_base", out_shuf["z_hat"])
+            sens = (
+                (z_hat_repr[mask_bool] - z_hat_shuf[mask_bool])
+                .norm(dim=-1)
+                .mean()
+            )
+            L_goal = F.relu(
+                torch.as_tensor(self.goal_margin, device=sens.device)
+                - sens
+            )
+        else:
+            L_goal = torch.zeros((), device=z_hat_repr.device)
+        L_goal_w = self.lambda_goal * L_goal
+
+        total = (
+            L_inv_w
+            + L_var_w
+            + L_cov_w
+            + self.lambda_scalar * L_scalar
+            + L_occ_w
+            + self.lambda_phys * L_phys
+            + L_raw_w
+            + L_goal_w
+        )
 
         out["loss_components"] = {
-            "L_inv": float(L_inv.detach()), "L_var": float(L_var.detach()),
+            "L_inv": float(L_inv.detach()),
+            "L_var": float(L_var.detach()),
             "L_cov": float(L_cov.detach()),
-            "L_scalar": float(L_scalar.detach()), "L_phys": float(L_phys.detach()),
+            "L_scalar": float(L_scalar.detach()),
+            "L_phys": float(L_phys.detach()),
             "L_occ": float(L_occ.detach()),
             "L_raw": float(L_raw.detach()),
+            "L_goal": float(L_goal.detach()),
             "L_inv_weighted": float(L_inv_w.detach()),
             "L_var_weighted": float(L_var_w.detach()),
             "L_cov_weighted": float(L_cov_w.detach()),
             "L_occ_weighted": float(L_occ_w.detach()),
             "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
             "L_raw_weighted": float(L_raw_w.detach()),
+            "L_goal_weighted": float(L_goal_w.detach()),
             "L_total": float(total.detach()),
         }
         out["occupancy_metrics"] = {

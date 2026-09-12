@@ -6,6 +6,7 @@ document at `docs/design_doc.md` (the attached v2 design doc). This file only sp
 build next, in what order, with what stop conditions**.
 
 Every phase below maps directly onto the design doc's own structure:
+
 - Setup work not covered by the design doc → **Phase -1** (this file only)
 - `§7` Training pathway Phases 0–7 → embedded inside the milestones below
 - `§7.1` Milestone sequencing A–I → the phase headers below, in the same order, same letters
@@ -64,6 +65,7 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
      VICReg/LeJEPA-SIGReg objectives, phase transitions, and winner selection live inside
      Milestone B's adaptive controller by operator decision. Tracked and worked via
      `checkpoints/milestone_b/BUGLOG.md` (see the fix directive that originated this entry).
+
 - **2026-08-24 — Physics-Guided Masked Retrofit sequence re-scoped mid-preflight.** The
       operator replaced the previously provided retrofit "Phase 2 (Geometry Decoder)" content
       with "Phase 2 — Fix VICReg Training/Validation Plumbing Before Cloud Run" (plumbing-only:
@@ -76,7 +78,7 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
       BLOCKED pending a genuine trained checkpoint) and then executed the new plumbing phase.
       See `checkpoints/physics_retrofit/preflight/REPORT.md` and
       `checkpoints/milestone_b/PHASE2_VICREG_PLUMBING_REPORT.md`.
-    - **2026-08-25 — Phase 2 Kaggle Preflight + Final Pipeline Acceptance completed.**
+  - **2026-08-25 — Phase 2 Kaggle Preflight + Final Pipeline Acceptance completed.**
       Repository hardening per Phase 2 spec: created `src/runtime/` device & reproducibility modules,
       `src/runtime/physics_controls.py` for canonical physics controls, updated BlockMasker with
       RNG state save/restore, overhauled checkpoint schema with atomic writes/validation,
@@ -88,7 +90,7 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
       `scripts/preflight/checkpoint_integrity_check.py`, `scripts/preflight/repo_static_audit.py`.
       Updated `CLOUD_TRAINING.md`, `notebooks/cloud_train_runner.ipynb`, `requirements.txt`
       (PyTorch 2.5.1 + Torchvision 0.20.1). All Phase-1 tests pass (292 passed, 7 skipped).
-    - **2026-09-08 — Goal-fix plan (direct goal route + ranking terms) DISABLED; superseded
+  - **2026-09-08 — Goal-fix plan (direct goal route + ranking terms) DISABLED; superseded
       by the Joint Target Redesign.** The operator retired
       `docs/UNIFIED_ARCHITECTURE_FIX_GOAL.md` in full — its audit conclusion's remedy
       (direct goal route), required comparisons, acceptance gates, Stage A/B/C execution
@@ -108,6 +110,24 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
       B decoder → C physics → D conditionality → E hard masking → F zero-context →
       G stochasticity); no mechanism from §13 ("do not add yet") may be implemented without
       a measured failure motivating it.
+  - **2026-09-12 — Stage-A full-train + goal A/B authorized (operator).** Two-part
+      sequencing override for the Joint Target Redesign Stage A only: (1) run Stage A on
+      the FULL train set (70k steps ≈ 1 epoch, batch 2) with rebalanced weights
+      (`lambda_raw=3.0`, `lambda_var=5.0`, `lambda_cov=1.0` — Run A, no goal term),
+      motivated by the measured fixed-rerun failure (raw_mse 2.36→5.29 rising while
+      VICReg-var takes 61% of the loss; direction learns, magnitude stalls at scale
+      0.36; 1500 steps see only 2.1% of training data); (2) ONLY after Run A is
+      evaluated, run an otherwise-identical Run B adding a minimal real-vs-shuffled
+      student margin loss (`lambda_goal=2.0`, `goal_margin=0.01` — the retired plan's
+      recorded hyperparameters, re-implemented as an opt-in `UnifiedJEPALoss` term on
+      the joint target, default off), and keep it ONLY if it improves
+      `target_spec_sensitivity_normalized` past 0.01 without regressing the scale /
+      concentration / bounded-delta gates vs Run A. Rationale: the 2026-09-08 retirement
+      removed goal-requirement machinery before any joint-target evidence existed; the
+      fixed rerun now supplies the measured failure (goal coupling 8.4e-05, worse than
+      the 0.0034 pre-fix) that justifies this scoped A/B per Standing Rule 2.
+      Tracked via `checkpoints/unified_stage_a/RERUN_FIXED_REPORT.md` and the Run-A/B
+      configs (`configs/unified_stage_a_full.yaml`, `configs/unified_stage_b_goal.yaml`).
 
 ---
 
@@ -116,7 +136,7 @@ Do not reorder, merge, or rename phases. Do not invent a different breakdown.
 **Local machine:** RTX 3050, 4GB VRAM, 16GB system RAM.
 
 **Decision, made once here so Phase -1 does not need to re-ask it:** the §11 model sizes (context
-+ predictor + decoder + frozen surrogate, Adam optimizer states, in-batch negatives for the
+- predictor + decoder + frozen surrogate, Adam optimizer states, in-batch negatives for the
 InfoNCE loss from Milestone E, K=32 sampling in Milestone H) do not fit in 4GB VRAM at any batch
 size useful for actual training. The local machine is therefore designated **dev-only**:
 
@@ -135,6 +155,7 @@ milestone prompt; reference `CLOUD_TRAINING.md` instead.
 
 **Session-continuity implication for you (the human operator):** because training happens on a
 separate machine/session from the coding agent, the loop for any training milestone is:
+
 1. Coding-agent session (local): write/update code + config for the milestone, commit, push.
 2. Cloud session (Kaggle/Colab, manual): pull latest code, run training per `CLOUD_TRAINING.md`,
    let it produce `checkpoints/<milestone>/REPORT.md` and any checkpoint files, push results back.
@@ -256,6 +277,7 @@ any modeling work begins.
 > Set up the project environment and repo scaffolding for the Goal-Conditioned Physics JEPA
 > project described in `docs/design_doc.md`. Do the following, in order, and stop after step 7 —
 > do not begin any modeling work (that starts at Milestone A):
+>
 > 1. Create the repo directory layout exactly as specified in `AGENTS.md`'s "Repo layout" section.
 > 2. Set up a local Python environment with the dependencies needed to run the MetaDiT reference
 >    implementation and a standard PyTorch training stack (exact package list is not specified in
@@ -294,6 +316,7 @@ any modeling work begins.
 `checkpoints/phase0/REPORT.md`, `CLOUD_TRAINING.md`, `notebooks/cloud_train_runner.ipynb`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: repo layout exists; MetaDiT repo cloned from the exact §18 URL; dataset
   and weights downloaded from the exact §18 URL; file-path re-verification recorded in
   `checkpoints/phase0/REPORT.md`; CLI-first convention for training scripts recorded.
@@ -336,12 +359,14 @@ file-path re-verification recorded.
 >
 > Stop once shapes are verified, weights load, and baseline reproduction is reported alongside
 > the proposed tolerance. Do not begin any new model code (that starts at Milestone A / §7 Phase
+>
 > 1) in this session.
 
 **Files/paths.** `src/data/`, `scripts/eval/reproduce_metadit_baseline.py`,
 `checkpoints/phase0/REPORT.md`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: shapes verified; all three released weight sets load; baseline
   reproduction numbers recorded; tolerance for "reproduced" explicitly proposed and confirmed by
   the human operator.
@@ -387,6 +412,7 @@ weights only — no modification), `scripts/eval/reproduce_metadit_baseline.py` 
 0), `checkpoints/milestone_a/`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: geometry-spectrum retrieval confirmed working with released weights;
   results recorded.
 - *Nice to have*: a small qualitative dump of a few retrieved geometry/spectrum pairs for sanity
@@ -460,6 +486,7 @@ machine.
 `scripts/train/train_milestone_b.py`, `checkpoints/milestone_b/`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: minimal 50% block-mask experiment run **on cloud GPU** and compared
   against direct masked baseline and null-goal proxy, per §7.2's explicit stop condition; if
   passed, full 20/40/60/80% sweep results recorded; goal-token entropy logging active and
@@ -468,6 +495,7 @@ machine.
 - *Nice to have*: qualitative visualization of which mask blocks are hardest to predict.
 
 **Guardrails specific to this phase.**
+
 - **Failure Mode 2 risk (§13, §9)**: predictor ignores the spectrum entirely,
   `P(Z_x, S) ≈ P(Z_x)`. The null-goal proxy comparison in §7.2 step 4 is the cheap early check;
   do not skip it even though the full InfoNCE/guidance machinery isn't built yet.
@@ -523,6 +551,7 @@ available per `CLOUD_TRAINING.md`.
 `scripts/train/train_milestone_c.py`, `checkpoints/milestone_c/`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: decoder implemented and producing physically valid (constraint-satisfying)
   geometry tensors; `L_G` ramp schedule implemented and active; confirmed the ramp-in doesn't
   disturb `L_J` beyond the human-confirmed tolerance; cloud run reviewed per the Compute
@@ -531,6 +560,7 @@ available per `CLOUD_TRAINING.md`.
   examples.
 
 **Guardrails specific to this phase.**
+
 - **Failure Mode 1 risk, early form (§13, §4.1)**: even before the physics loss exists, a decoder
   loss introduced too aggressively can already start pulling the latent toward being "whatever
   the decoder needs" rather than a genuine predictive target. The ramp schedule and the
@@ -590,6 +620,7 @@ correspond to structures that actually approach the requested electromagnetic ta
 `checkpoints/milestone_d/`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: physics loop functioning end-to-end (`Ĝ → F_EM → Ŝ`); `L_S`/`L_A`
   ramped per §4.1; CFG implemented with the guidance-gap diagnostic logging; Ablation D run and
   reported, with `L_J` degradation within the confirmed tolerance; cloud run reviewed.
@@ -597,6 +628,7 @@ correspond to structures that actually approach the requested electromagnetic ta
   ratios is not required until Milestone F, but computing it once here is useful early signal).
 
 **Guardrails specific to this phase.**
+
 - **Failure Mode 1, full form (§13, §5, §4.1)**: this is the phase where physics-loss dominance is
   most likely to actually manifest, since decoder gradients can now flow back through `Ẑ_y`.
   Ablation D is the mandated check — do not skip it or defer it to the final ablation table.
@@ -652,6 +684,7 @@ are trivial.
 `checkpoints/milestone_e/`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: `L_goal` implemented and active with a deliberately sized batch;
   sparse top-k routing implemented and replacing dense attention; both the internal (H6) and
   externally-validated (§20.1) routing consistency checks run and reported, with rank-correlation
@@ -660,6 +693,7 @@ are trivial.
   loss, per §4).
 
 **Guardrails specific to this phase.**
+
 - **Failure Mode 2, precise form (§9)**: this is the phase the design doc identifies as the
   direct, targeted fix for the "exogenous but control-relevant feature discarding" failure mode
   documented in the Pendharkar paper (arXiv:2606.30068) — cite this specific 2×2-cell match if
@@ -716,6 +750,7 @@ curriculum, then run the true zero-context, physics-only discovery experiment.
 metrics from §8.1), `checkpoints/milestone_f/`.
 
 **Done criteria.**
+
 - *Must pass to proceed*: full curriculum trained without catastrophic forgetting of higher-context
   regimes; §7.3 minimal zero-context experiment run and reported (mean/best error, diversity,
   uniqueness, validity for 32 samples); full Phase 7 zero-context evaluation run; §20.3 normalized
@@ -725,6 +760,7 @@ metrics from §8.1), `checkpoints/milestone_f/`.
   spectra.
 
 **Guardrails specific to this phase.**
+
 - **"Zero-context generation collapses to trivial/memorized shapes" (§13)**: this is the primary
   risk this milestone is built to detect. The §8.1 novelty metrics and diversity/uniqueness
   numbers from §7.3 exist specifically to catch this — do not report zero-context success based on
@@ -771,6 +807,7 @@ with LeJEPA variant, do not fork into a separate file unless the interface genui
 `checkpoints/milestone_g/`.
 
 **Done criteria.**
+
 - *Must pass to proceed (for downstream milestones that might use LeJEPA)*: Ablation E comparison
   run and reported with a clear empirical recommendation; SIGReg hyperparameters documented.
 - Note: Milestones H and I do not strictly require LeJEPA to "win" — they can proceed with
@@ -820,6 +857,7 @@ GPU actually available.
 `checkpoints/milestone_h/`.
 
 **Done criteria.**
+
 - *Must pass to proceed (to consider Milestone I at all)*: one-shot stochastic model trained; H4
   metrics (avg/best-of-K spectral accuracy, geometry diversity, latent diversity, pairwise
   structural distance) reported; an explicit determination of whether mode coverage is adequate or
@@ -827,6 +865,7 @@ GPU actually available.
 - *Nice to have*: qualitative K-sample gallery for a few representative target spectra.
 
 **Guardrails specific to this phase.**
+
 - **"Stochastic samples fail to improve mode coverage" (§13)**: this is the specific failure this
   milestone must check for, not assume away. If `K` samples collapse to near-identical structures,
   this is itself a valid and reportable outcome (per §13's framing that a negative result here is
@@ -873,12 +912,14 @@ confirm Kaggle/Colab quota can absorb it.
 `scripts/train/train_milestone_i.py`, `checkpoints/milestone_i/`.
 
 **Done criteria.**
+
 - *Must pass to proceed (to a final writeup)*: flow-matching path implemented over the latent
   space only (not geometry space); H4 evaluation re-run and directly compared against Milestone
   H's one-shot results; explicit conclusion on whether the added complexity/compute was justified.
 - *Nice to have*: none beyond the above — this is the terminal milestone in §7.1's sequence.
 
 **Guardrails specific to this phase.**
+
 - **Scope creep back toward MetaDiT (§1.7, §0)**: the single biggest risk here is implementing
   diffusion over raw geometry (which is what MetaDiT already does) instead of latent
   flow-matching — this would directly undercut the project's stated core claim. Confirm the flow
