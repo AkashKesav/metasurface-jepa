@@ -552,6 +552,8 @@ def validate(model, objective, val_batches, cfg, device):
         "L_occ_weighted": [],
         "L_phys": [],
         "L_phys_weighted": [],
+        "L_goal": [],
+        "L_goal_weighted": [],
         "occupancy_iou": [],
         "occupancy_f1": [],
         "pred_occupancy_fraction": [],
@@ -580,6 +582,24 @@ def validate(model, objective, val_batches, cfg, device):
                 )
                 # The model/objective are in eval mode here, but the frozen
                 # surrogate must still be evaluated for a truthful L_phys.
+                # Goal control: same derangement every validation call (fixed
+                # generator) so val L_goal is comparable across time; never
+                # touches the training curriculum stream.
+                if getattr(objective, "lambda_goal", 0.0) > 0:
+                    if B < 2:
+                        raise ValueError(
+                            "validate: lambda_goal>0 needs B>=2 for a valid "
+                            f"derangement (got B={B})."
+                        )
+                    from runtime.physics_controls import derangement_permutation
+
+                    g_val = torch.Generator(device=spec.device)
+                    g_val.manual_seed(cfg["train"].get("seed", 42) + 7919)
+                    spec_shuf_v = spec[
+                        derangement_permutation(B, spec.device, generator=g_val)
+                    ]
+                else:
+                    spec_shuf_v = None
                 result = objective(
                     model,
                     occ,
@@ -589,6 +609,7 @@ def validate(model, objective, val_batches, cfg, device):
                     M,
                     goal_mode="real",
                     compute_physics=True,
+                    spectrum_shuf=spec_shuf_v,
                 )
                 out = result["out"]
                 mask_bool = out["mask"]
@@ -664,6 +685,8 @@ def validate(model, objective, val_batches, cfg, device):
                     "L_occ_weighted",
                     "L_phys",
                     "L_phys_weighted",
+                    "L_goal",
+                    "L_goal_weighted",
                 ):
                     metrics[k].append(float(c[k]))
                 occ_metrics = occupancy_reconstruction_metrics(
@@ -694,7 +717,13 @@ def validate(model, objective, val_batches, cfg, device):
         occ_v, sv_v, spec_v = val_batches[0]
         B = occ_v.shape[0]
         sk_v = torch.ones(B, 3, dtype=torch.bool, device=device)
-        M = val_masker.sample(occ_v, val_mask_ratio).to(device)
+        # Broadcast contract (same as above): per-sample masks trip the
+        # predictor's Stage-A guard, which would mask this diagnostic as an
+        # error string instead of measuring the guidance gap.
+        if getattr(model, "requires_broadcast_mask", False):
+            M = _sample_mask(val_masker, occ_v, val_mask_ratio).to(device)
+        else:
+            M = val_masker.sample(occ_v, val_mask_ratio).to(device)
         gap_info = compute_guidance_gap(
             model, occ_v, sv_v, sk_v, spec_v, M, device=device
         )
