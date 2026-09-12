@@ -27,6 +27,17 @@ REPO = Path("/kaggle/working/metasurface-jepa")
 RESULTS = Path("/kaggle/working/results")
 RESULTS.mkdir(parents=True, exist_ok=True)
 
+_stage_n = 0
+
+
+def mark(name, text=""):
+    # Stage-marker files: written to RESULTS as the script progresses, so a
+    # mid-run ERROR still leaves a trail showing exactly how far it got.
+    global _stage_n
+    _stage_n += 1
+    (RESULTS / f"{_stage_n:02d}_{name}.txt").write_text(text)
+    print(f"[stage {_stage_n:02d} {name}] {text[:200]}", flush=True)
+
 BRANCH = "docs/full-training-audit-pr"
 FORK_URL = "https://github.com/AkashKesav/metasurface-jepa.git"
 # Pin the exact code commit this kernel was authored against. Updated at push
@@ -61,12 +72,20 @@ print(f"expected tip:      {EXPECTED_TIP}", flush=True)
 (REPO / ".kernel_commit").write_text(
     f"cloned={tip}\nexpected_at_author_time={EXPECTED_TIP}\n"
 )
+mark("clone_done", f"tip={tip} expected={EXPECTED_TIP}")
 
 # 2. Install deps.
 subprocess.run(
     ["python", "-m", "pip", "install", "-q", "-r", str(REPO / "requirements.txt")],
     check=True,
 )
+_torch_ver = subprocess.run(
+    ["python", "-c", "import torch; print(torch.__version__, torch.cuda.is_available())"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+mark("deps_done", f"torch={_torch_ver}")
 
 # 3. Locate the staging dataset and symlink it in.
 data_root = None
@@ -90,6 +109,7 @@ for name in ("split_data", "weights"):
         link.unlink()
     link.symlink_to(target)
     print(f"symlinked {link} -> {target}", flush=True)
+mark("data_done", f"data_root={data_root}")
 
 cfg_path = REPO / "configs" / "unified_stage_a_full.yaml"
 print("config device line:", flush=True)
@@ -104,6 +124,8 @@ for line in cfg_path.read_text().splitlines():
 # a clear cause instead of an opaque mid-run ERROR with no artifacts.
 run_env = dict(os.environ)
 run_env["PYTHONUNBUFFERED"] = "1"
+# Captured (not inherited): the full preflight transcript persists to
+# RESULTS/preflight.log whether it passes or fails.
 preflight_proc = subprocess.run(
     [
         "python",
@@ -116,8 +138,18 @@ preflight_proc = subprocess.run(
     ],
     cwd=str(REPO),
     env=run_env,
+    capture_output=True,
+    text=True,
 )
+(RESULTS / "preflight.log").write_text(
+    (preflight_proc.stdout or "") + "\n--- STDERR ---\n" + (preflight_proc.stderr or "")
+)
+print(preflight_proc.stdout[-3000:], flush=True)
 print(f"preflight exit code: {preflight_proc.returncode}", flush=True)
+mark(
+    "preflight_done" if preflight_proc.returncode == 0 else "preflight_FAILED",
+    f"exit={preflight_proc.returncode} tail={(preflight_proc.stdout or '')[-500:]}",
+)
 if preflight_proc.returncode != 0:
     raise RuntimeError("preflight FAILED — refusing to start the full run")
 
