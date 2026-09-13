@@ -456,10 +456,16 @@ class UnifiedJEPA(nn.Module):
         elif hard_forward:
             # Audit B18: hard_forward during training without STE would deliver
             # a zero-gradient occupancy to the surrogate (no backward path).
-            assert not self.training, (
-                "decode_geometry: hard_forward=True during training requires "
-                "use_ste=True — otherwise the deployed occupancy carries no "
-                "gradient; run this path under eval/no_grad for diagnostics")
+            # The hazard is losing a gradient, so the predicate is gradient
+            # tracking, not the model's mode: under torch.no_grad() there is no
+            # backward to starve and the diagnostic this message advertises is
+            # legal in train mode (audit B21 — testing self.training instead
+            # refused preflight's hard-assembly diagnostics and broke the gate).
+            assert not self.training or not torch.is_grad_enabled(), (
+                "decode_geometry: hard_forward=True on a gradient-enabled "
+                "training forward requires use_ste=True — otherwise the "
+                "deployed occupancy carries no gradient; run diagnostics under "
+                "torch.no_grad() or eval()")
             occ_for_assembly = (soft_occ > 0.5).float()
         else:
             occ_for_assembly = soft_occ

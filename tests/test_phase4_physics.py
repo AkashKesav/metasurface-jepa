@@ -464,6 +464,33 @@ def test_decode_geometry_refuses_zero_gradient_hard_forward_in_training():
         model.decode_geometry(z_hat, pred, hard_forward=True, use_ste=False)
 
 
+def test_decode_geometry_allows_no_grad_hard_forward_diagnostic_in_training():
+    """Audit B21: the B18 guard must refuse only a GRADIENT-CARRYING training
+    forward. Under torch.no_grad() there is no backward path, so the diagnostic
+    the guard's own message advertises ("run this path under eval/no_grad") has
+    no gradient to lose and must be permitted.
+
+    preflight() performs its hard-assembly diagnostics exactly this way — in
+    train mode, without gradients — and the guard refused it, which broke the
+    mandatory real-data gate before it could run (surfaced by the first cloud
+    run, 2026-09-13). The paired test above asserts the hazardous combination is
+    still refused, so this is a precision fix, not a loosening.
+    """
+    model = _build_model()
+    model.train()
+    assert model.training, "exercise the diagnostic in train mode"
+    z_hat = torch.randn(2, 256, 192)
+    pred = torch.rand(2, 3) * 2 + 1
+    with torch.no_grad():
+        geometry, occ = model.decode_geometry(
+            z_hat, pred, hard_forward=True, use_ste=False)
+    assert geometry.shape == (2, 3, 64, 64)
+    assert torch.isfinite(geometry).all()
+    assert set(occ.unique().tolist()) <= {0.0, 1.0}, (
+        "the hard_forward path must deliver a binary occupancy — the broadcast"
+        " invariant check in preflight() depends on it")
+
+
 def test_physics_loss_rejects_degenerate_spectrum_std():
     """Audit B18: a near-constant target spectrum must raise instead of being
     amplified through a silent 1e-6 standard-deviation floor."""

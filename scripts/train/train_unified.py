@@ -1092,28 +1092,35 @@ def preflight(cfg, device=None):
         raise RuntimeError(f"preflight: non-finite total loss {loss.item()}")
     loss.backward()
 
+    # Everything below is diagnostic — shapes, broadcast invariants and scalar
+    # precedence are read off the assembled geometry and nothing here is
+    # backwarded (the training forward/backward is already done above). It runs
+    # under no_grad so the hard_forward decodes are legal in train mode: the B18
+    # guard refuses a hard-thresholded forward only while gradients are actually
+    # being tracked (audit B21).
     out = result["out"]
-    geometry, _ = model.decode_geometry(
-        out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
-        scalar_known=sk, scalar_values=sv)
-    spec_pred = surrogate(geometry).prediction
+    with torch.no_grad():
+        geometry, _ = model.decode_geometry(
+            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
+            scalar_known=sk, scalar_values=sv)
+        spec_pred = surrogate(geometry).prediction
 
-    # Cleanup item 7: geometry broadcast invariants on the assembled tensor.
-    # The invariant check uses the HARD (binary) occupancy assembly — the
-    # broadcast invariants (constant occupied values per channel) are defined
-    # for the deterministic binary MetaDiT convention. The soft-occupancy
-    # path is the differentiable training path and legitimately has
-    # continuously-valued channels; it is checked separately via
-    # hard_forward=True here.
-    from data.factorize import validate_geometry_broadcast
-    geometry_hard, _ = model.decode_geometry(
-        out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
-        scalar_known=sk, scalar_values=sv, hard_forward=True)
-    invariant_violations = validate_geometry_broadcast(geometry_hard)
-    if invariant_violations:
-        raise RuntimeError(
-            f"preflight: assembled geometry violates broadcast invariants: "
-            f"{invariant_violations}")
+        # Cleanup item 7: geometry broadcast invariants on the assembled tensor.
+        # The invariant check uses the HARD (binary) occupancy assembly — the
+        # broadcast invariants (constant occupied values per channel) are defined
+        # for the deterministic binary MetaDiT convention. The soft-occupancy
+        # path is the differentiable training path and legitimately has
+        # continuously-valued channels; it is checked separately via
+        # hard_forward=True here.
+        from data.factorize import validate_geometry_broadcast
+        geometry_hard, _ = model.decode_geometry(
+            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=M,
+            scalar_known=sk, scalar_values=sv, hard_forward=True)
+        invariant_violations = validate_geometry_broadcast(geometry_hard)
+        if invariant_violations:
+            raise RuntimeError(
+                f"preflight: assembled geometry violates broadcast invariants: "
+                f"{invariant_violations}")
 
     # Cleanup item 7 / Fix 5: scalar precedence — the assembled geometry must
     # use scalar_values where known and the PREDICTION where unknown. Both
