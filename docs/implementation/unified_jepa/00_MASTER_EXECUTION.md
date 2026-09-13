@@ -107,6 +107,14 @@ EMA:
 - `scalar_mlp_ema` = target-side FiLM conditioning only;
 - no scalar EMA latent loss target.
 
+> **2026-09-13 operator override — the legacy path is retired.** The operator directed the
+> retirement of the 384-D Milestone-B path ("retire the old 384d … use this commit only, the
+> newer ones are broken", pinned at `f557eb6`): its code, scripts, tests, and configs are
+> deleted, superseding the retention instructions in this file, in
+> `03_training_and_objective.md`, and in `05_tests_evaluation_cleanup.md`. Historical reports
+> remain under `checkpoints/**`; the retired tree is recoverable from git at `f557eb6`. The
+> section below is kept as the record of what was retired.
+
 ## Old Milestone-B checkpoint
 
 The old architecture is:

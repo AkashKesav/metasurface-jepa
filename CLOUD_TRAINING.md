@@ -1,267 +1,178 @@
-# CLOUD_TRAINING.md — Kaggle / Colab Training Runbook (Phase 2 Updated)
+# CLOUD_TRAINING.md — Kaggle / Colab Training Runbook (unified 192-D path)
 
-This is the **canonical** cloud-training workflow referenced by `AGENTS.md`. Any milestone whose
-task prompt involves gradient-based training points here instead of re-deriving its own cloud
-setup. Local machine (RTX 3050, 4GB VRAM / 16GB RAM) is dev-only — see `AGENTS.md`'s
-"Compute environment" section for why.
+This is the **canonical** cloud-training workflow referenced by `AGENTS.md`. Any work whose
+task involves gradient-based training points here instead of re-deriving its own cloud setup.
+The local machine (RTX 3050, 4GB VRAM / 16GB RAM) is dev-only — see `AGENTS.md` Standing Rule 5.
 
-Every `scripts/train/train_milestone_<x>.py` is written as a standalone CLI script
-(`python scripts/train/train_milestone_<x>.py --config configs/milestone_<x>.yaml [--resume
-<path>]`) specifically so it can be invoked identically from either platform below with no
-notebook-specific glue code.
-
----
-
-## 0. One-time setup (do this once per platform, not per milestone)
-
-### GitHub repo
-Push your local repo to GitHub (private is fine, both platforms support private repo access via
-a personal access token).
+The single training entry point is a standalone CLI:
 
 ```bash
-git init
-git remote add origin https://github.com/<you>/<repo>.git
-git add .
-git commit -m "initial scaffold"
-git push -u origin main
+python scripts/train/train_unified.py --config configs/unified.yaml [--resume <path>] \
+    [--device cuda] [--max-steps N] [--preflight] [--no-train] [--use-synthetic-smoke]
 ```
 
-### Dataset staging
-The MetaDiT dataset/weights come from the exact URL in the design doc §18:
-`https://huggingface.co/datasets/Hao-Li-131/MetaDiT-AAAI2026`. Don't re-download this every
-session on either platform — stage it once:
+so it can be invoked identically from either platform below with no notebook-specific glue.
 
-- **Kaggle**: create a private Kaggle Dataset from the downloaded `data/metadit/` folder
-  (kaggle.com → "New Dataset" → upload), then attach it as a notebook input
-  (`/kaggle/input/<dataset-name>/`).
-- **Colab**: upload `data/metadit/` to a fixed Google Drive folder once
-  (`/content/drive/MyDrive/<project>/data/metadit/`), and mount Drive each session instead of
-  re-downloading.
+> The legacy `milestone_b_preflight.py` / `train_milestone_b.py` workflow was retired with the
+> 384-D path on 2026-09-13 (`AGENTS.md` → Dated operator overrides).
+
+---
+
+## 0. One-time setup (per platform, not per session)
+
+### Repository
+Push the repo to GitHub (private is fine; both platforms support token auth). Keep the branch
+you train from fixed and record the commit in the run report — the architecture is pinned by
+commit, not by "latest".
+
+### Dataset + released weights staging
+Everything comes from the MetaDiT release (**dataset and released weights, not re-downloaded per
+session**). The trainer expects this layout under `data/metadit/`:
+
+```text
+data/metadit/
+  split_data/train_set.mat
+  split_data/val_set.mat
+  weights/spec_encoder.pth        # released spectrum encoder
+  weights/metadit-small.bin       # released DiT (reference only)
+  weights/surrogate_model.bin     # frozen EM surrogate (physics path)
+```
+
+- **Kaggle**: create a private Kaggle Dataset from your downloaded `data/metadit/` folder, then
+  attach it to the notebook (Add Data). It appears under `/kaggle/input/<dataset-name>/`.
+- **Colab**: upload `data/metadit/` once to a fixed Drive folder and mount it each session.
+
+Do **not** commit dataset or weight files to the repo.
 
 ### Dependency contract
-The repository pins an explicitly tested PyTorch/Torchvision combination in `requirements.txt`:
-- **PyTorch 2.5.1**
-- **Torchvision 0.20.1**
-
-Do not change these without re-running the full preflight suite. The preflight script
-`scripts/preflight/milestone_b_preflight.py` will fail if the environment does not match.
+`requirements.txt` pins the tested combination (PyTorch 2.5.1 / Torchvision 0.20.1). Install with
+`pip install -r requirements.txt`; do not change the pins without re-running the full test suite
+and the preflight below.
 
 ---
 
-## 1. Kaggle workflow
+## 1. Kaggle workflow (per session)
 
-**Per-session steps** (repeat each time you start a new Kaggle session for a milestone):
-
-1. Open/create a Notebook, attach GPU accelerator (Settings → Accelerator → GPU T4 x2 or P100).
-   Turn Internet **ON** if cloning from GitHub or installing packages.
-2. Attach the staged MetaDiT dataset as a notebook input (Add Data → your dataset).
-3. Clone the repo and install deps:
+1. New Notebook → Settings → Accelerator **GPU T4 x2 / P100**; turn **Internet ON** (clone/install).
+2. Attach your staged dataset (Add Data).
+3. Clone the pinned repo state and install:
    ```python
    !git clone https://github.com/<you>/<repo>.git
-   %cd repo
+   %cd <repo>
+   !git checkout <pinned-commit-or-branch>
    !pip install -r requirements.txt
    ```
-4. **Run preflight check** (mandatory before any training):
+4. Stage the dataset (symlink is preferred; a real directory is never clobbered):
    ```python
-   !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml --device cuda:0
+   !ln -s /kaggle/input/<dataset-name>/metadit data/metadit
+   !ls data/metadit/split_data data/metadit/weights
    ```
-   This verifies: environment contract, git state, dataset, model/objective, tiny training,
-   validation, physics controls, checkpoint save/load/resume, and config validation.
-   `--device` selects the device explicitly (`auto`, `cpu`, or `cuda:0`) — on Kaggle GPUs use
-   `cuda:0`; the resolved selection is used by every later preflight stage.
-   **Exit code 1 = DO NOT START TRAINING.**
-5. **Run preflight to discover and link dataset** (replaces manual symlink):
-    ```python
-    !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml --device cuda:0
-    ```
-    The preflight will auto-discover the dataset location and create the `data/metadit`
-    symlink (skipped if already pinned; a real directory at that path is never clobbered;
-    if symlink creation fails, pass `--data-root` explicitly instead).
-6. Confirm GPU:
+5. **Preflight (mandatory, real data, end-to-end)**:
    ```python
-   !nvidia-smi
+   !python scripts/train/train_unified.py --config configs/unified.yaml --device cuda --preflight
    ```
-7. Run the milestone's training script (resume if a checkpoint already exists from a prior
-   session — inspect `checkpoints/milestone_b/` and choose the exact objective/experiment
-   artifact):
-    ```python
-    !python scripts/train/train_milestone_b.py \
-        --config configs/milestone_b.yaml \
-        --resume /kaggle/working/checkpoints/milestone_b/minimal_jepa_vicreg_latest.pt
-    ```
-    For a fresh run, omit `--resume`. The training script produces filenames like
-    `<experiment>_<objective>_latest.pt` (e.g. `minimal_jepa_vicreg_latest.pt`).
-8. Checkpoint into `/kaggle/working/checkpoints/...` throughout the run (the training script
-   handles this per its `--resume`-compatible checkpointing, per `AGENTS.md`'s "Training scripts
-   must be resumable" requirement).
-9. **Configure persistent checkpoint storage** (mandatory per Phase 2 §5):
-   - Before training, ensure `checkpoints/` is symlinked to persistent storage
-   - At every checkpoint: save → verify exists → verify loadable
-   - After training: checkpoint provenance validation + checkpoint integrity validation
-   - If persistent storage is not configured: **ABORT BEFORE TRAINING**
-10. **Before the session ends** (Kaggle sessions cap at ~9–12 hours, quota ~30 GPU-hrs/week):
-    - "Save Version" → "Save & Run All" to snapshot `/kaggle/working/` so it isn't lost, **or**
-    - push results directly back to GitHub from within the notebook:
-      ```python
-      %cd repo
-      !git config user.email "you@example.com"
-      !git config user.name "you"
-      !git add checkpoints/milestone_b/
-      !git commit -m "milestone B: cloud training run, see REPORT.md"
-      !git push
-      ```
-      (requires a GitHub personal access token set as a Kaggle Secret, referenced via
-      `!git remote set-url origin https://<token>@github.com/<you>/<repo>.git`)
-
-**Resuming after a session ends/quota resets:** start a new session, repeat steps 1–5, then pass
-`--resume` pointing at the last checkpoint pulled from GitHub (or restored from a saved notebook
-version).
+   This loads real splits and released weights, runs a forward/backward with the shared
+   ownership checks (student modules get gradients; both EMA targets, the released spectrum
+   encoder, and the frozen surrogate receive **none**), and exits non-zero on any failure.
+   **Non-zero exit = do not start training.**
+6. **Verification-scale run (5–10 % of the schedule)** — proves the full real-data pipeline
+   (data loading → training step → EMA updates → checkpoint write) before committing GPU-hours:
+   ```python
+   !python scripts/train/train_unified.py --config configs/unified.yaml --device cuda --max-steps 150
+   ```
+   (`--max-steps` overrides `train.total_steps`; with `total_steps: 1500` in the config, 150
+   steps ≈ 10 %. Checkpoints land in `checkpoints/unified/`.)
+   Inspect the printed per-step losses and the final JSON. These checkpoints are **verification
+   artifacts, not results** — delete them before the full run (or deliberately resume from them;
+   the shortened schedule affects the LR/EMA ramp, so a fresh full run is the clean default):
+   ```python
+   !rm -f checkpoints/unified/*.pt
+   ```
+7. **Full run** (resume whenever a checkpoint from a previous session exists):
+   ```python
+   !python scripts/train/train_unified.py --config configs/unified.yaml --device cuda
+   # or:
+   !python scripts/train/train_unified.py --config configs/unified.yaml --device cuda \
+       --resume checkpoints/unified/latest.pt
+   ```
+   Training writes `checkpoints/unified/latest.pt` frequently and `final.pt` at the end
+   (atomic writes; `checkpoints/**/*.pt` is gitignored). Keep the working directory (or a
+   symlinked persistent folder) stable so `--resume` finds them.
+8. **Evaluate** (after any training): the authoritative per-scenario evaluator —
+   `A` pure inverse design (full occupancy mask + all scalars unknown — the hard stratum),
+   `B` partial-parameter conditioning, `C` retrofit; never pooled:
+   ```python
+   !python scripts/eval/eval_scenarios.py --config configs/unified.yaml \
+       --checkpoint checkpoints/unified/latest.pt --device cuda
+   ```
+   And the §20.3 guidance-gap curve across mask-ratio buckets:
+   ```python
+   !python scripts/diagnostics/run_guidance_gap_sweep.py --config configs/unified.yaml \
+       --checkpoint checkpoints/unified/latest.pt --device cuda
+   ```
+   The acceptance gate is the **hard stratum** real-vs-shuffled physics-consistency gap
+   (`architecture_v5.md` §8.3 check 8) — never report a pooled gap.
+9. **Before the session ends** (Kaggle sessions cap at ~9–12 h; quota ~30 GPU-h/week):
+   save a notebook version ("Save & Run All") so `/kaggle/working/` is snapshotted, and/or push
+   results back (`git add -f checkpoints/unified/*.pt` is wrong — push the **report** and keep
+   checkpoint files on Kaggle output/Drive; see §3).
 
 ---
 
-## 2. Colab workflow
+## 2. Colab workflow (per session)
 
-**Per-session steps:**
-
-1. Open a new Colab notebook, Runtime → Change runtime type → GPU (T4 free tier; A100/more
-   reliable T4 on Colab Pro).
-2. Mount Drive (this is where checkpoints/data persist across sessions, since Colab's local disk
-   is wiped each session):
+1. Runtime → Change runtime type → **GPU** (T4 free tier; A100/Pro T4 if available).
+2. Mount Drive — checkpoints and dataset live there (Colab local disk is wiped each session):
    ```python
    from google.colab import drive
    drive.mount('/content/drive')
    ```
-3. Clone the repo (into local Colab disk — code doesn't need to persist on Drive, only
-   data/checkpoints do):
+3. Clone + install (code does not need to persist on Drive):
    ```python
    !git clone https://github.com/<you>/<repo>.git
-   %cd repo
+   %cd <repo>
+   !git checkout <pinned-commit-or-branch>
    !pip install -r requirements.txt
    ```
-4. **Run preflight check** (mandatory before any training):
-   ```python
-   !python scripts/preflight/milestone_b_preflight.py --config configs/milestone_b.yaml \
-       --data-root /content/drive/MyDrive/<project>/data/metadit \
-       --device cuda:0
-   ```
-5. Symlink data and checkpoints to the persistent Drive folder:
+4. Stage data + checkpoints on Drive:
    ```python
    !ln -s /content/drive/MyDrive/<project>/data/metadit data/metadit
-   !mkdir -p /content/drive/MyDrive/<project>/checkpoints
+   !mkdir -p /content/drive/MyDrive/<project>/checkpoints/unified
    !ln -s /content/drive/MyDrive/<project>/checkpoints checkpoints
    ```
-6. Confirm GPU:
-   ```python
-   !nvidia-smi
-   ```
-7. Run the milestone's training script, same as Kaggle (inspect `checkpoints/milestone_b/`
-   and choose the exact objective/experiment artifact):
-    ```python
-    !python scripts/train/train_milestone_b.py \
-        --config configs/milestone_b.yaml \
-        --resume checkpoints/milestone_b/minimal_jepa_vicreg_latest.pt
-    ```
-    For a fresh run, omit `--resume`. The training script produces filenames like
-    `<experiment>_<objective>_latest.pt` (e.g. `minimal_jepa_vicreg_latest.pt`).
-   Because `checkpoints/` is symlinked to Drive, checkpoints survive disconnects automatically —
-   no separate save step needed, but do periodically confirm files are actually landing on Drive
-   (Colab disconnects can occasionally drop the last few seconds of I/O).
-8. Push results back to GitHub when the run reaches a stopping point (same git commands as the
-   Kaggle section above), or just leave results on Drive and copy `REPORT.md` back manually.
+5. Preflight + verification run + full run, exactly as in §1 steps 5–7 (same commands; `--device cuda`).
+6. Because `checkpoints/` is symlinked to Drive, checkpoints survive disconnects — but confirm
+   files are actually landing on Drive after the first checkpoint.
+7. Evaluate as in §1 step 8.
 
-**Watch out for:** free-tier idle timeouts and ~12hr hard session caps — this is exactly why
-resumable checkpointing (step 7) matters more on Colab than almost anywhere else in this project.
+**Watch out for:** free-tier idle timeouts and ~12 h hard caps — resume from
+`checkpoints/unified/latest.pt` in the next session instead of restarting.
 
 ---
 
-## 3. Which platform for which milestone
+## 3. Sync-back checklist (before closing every cloud session)
 
-No strict rule, but as a default:
-
-- **Milestone B–D** (moderate size, need to run the §7.2 minimal experiment plus a 20/40/60/80%
-  sweep, then the physics loop): either platform works; Kaggle's dataset-attachment model avoids
-  re-uploading the ~170k-sample dataset repeatedly, which is convenient here.
-- **Milestone E** (InfoNCE with in-batch negatives — wants a real batch size, more memory
-  pressure): prefer whichever platform is currently giving you the larger/more reliable GPU
-  (check `nvidia-smi` output at session start on both if unsure).
-- **Milestone F** (full context curriculum, longest sequential training): Kaggle's weekly quota
-  structure suits a "train a chunk, checkpoint, resume next session" pattern well.
-- **Milestone G–I** (LeJEPA ablation, stochastic latent K=32 eval, optional flow-matching):
-  highest compute cost per §6 — confirm quota availability on whichever platform before starting,
-  per `AGENTS.md` Standing Rule 5.
+- [ ] `checkpoints/unified/latest.pt` (and `final.pt` if the run completed) persisted somewhere
+      durable — Kaggle output / Drive — not only the ephemeral session disk.
+- [ ] `checkpoints/unified/REPORT.md` updated: platform/GPU, commit, steps run, loss/regime
+      observations, whether the verification-scale run passed, resume path, deviations.
+- [ ] Report + code changes pulled back locally (`git pull`) before the next coding session —
+      the next session assumes the report is current.
+- [ ] If the run is unfinished: note the exact `--resume` path and remaining steps in the report.
 
 ---
 
-## 4. Sync-back checklist (do this before closing every cloud session)
+## 4. Post-training verification (what must be recorded)
 
-- [ ] Latest checkpoint file(s) saved somewhere persistent (Kaggle Dataset/Drive/GitHub) — not
-      only on the ephemeral session disk.
-- [ ] `checkpoints/<milestone>/REPORT.md` updated with: metrics observed, done-criteria status,
-      which platform/GPU was used, any deviations from the design doc.
-- [ ] Results pulled back into your local repo (via `git pull`) before opening the next
-      coding-agent session — the next session's task prompt assumes this REPORT.md is current.
-- [ ] If the milestone is not yet done, note in REPORT.md exactly what checkpoint to `--resume`
-      from and what remains, so the next cloud session (possibly days later, possibly you've
-      forgotten details) can pick up cleanly.
+1. `scripts/eval/eval_scenarios.py` output per scenario (A/B/C separately), including:
+   - hard-stratum real/null/shuffled comparison (the gate: real must beat shuffled),
+   - occupancy IoU/F1 on the occupied class and predicted occupancy-fraction variability,
+   - scalar MAE on unknown positions (and known-position diagnostics as labelled),
+   - generative-diversity numbers, and the NN-retrieval baseline.
+2. `run_guidance_gap_sweep.py` curve (§20.3).
+3. Anything that failed, with observed numbers — see `AGENTS.md` "If something fails": never
+   loosen a gate silently; escalate to the operator.
 
----
-
-## 5. Post-training verification (Phase 2 §13)
-
-After training completes, verify the EXACT produced checkpoint:
-
-```bash
-python scripts/diagnostics/checkpoint_provenance_audit.py
-python scripts/preflight/checkpoint_integrity_check.py \
-    --checkpoint <EXACT_CHECKPOINT>
-python scripts/eval/eval_vicreg_sanity.py \
-    --checkpoint <EXACT_CHECKPOINT> \
-    --config configs/milestone_b.yaml \
-    --device cuda:0
-python scripts/eval/physics_conditioning_audit.py \
-    --checkpoint <EXACT_CHECKPOINT> \
-    --config configs/milestone_b.yaml \
-    --device cuda:0
-```
-
-Then compare final evaluation against in-loop validation. They must use the same
-validation/mask/metric implementation.
-
----
-
-## 6. Final acceptance (Phase 2 §14)
-
-Create `checkpoints/milestone_b/FINAL_PIPELINE_ACCEPTANCE.md` recording:
-
-| Gate | Result |
-|------|--------|
-| Fresh clone | PASS/FAIL |
-| Dependency install | PASS/FAIL |
-| Dataset discovery | PASS/FAIL |
-| CPU preflight | PASS/FAIL |
-| CUDA preflight | PASS/FAIL |
-| One-step CUDA train | PASS/FAIL |
-| Checkpoint save/load | PASS/FAIL |
-| Resume | PASS/FAIL |
-| Persistent checkpoint | PASS/FAIL |
-| In-loop/final metric consistency | PASS/FAIL |
-| Physics-control consistency | PASS/FAIL |
-| Static audit | PASS/FAIL |
-| Full tests | PASS/FAIL |
-
-Phase 2 is complete only when this exact chain succeeds:
-```
-fresh clone
-→ fresh Kaggle session
-→ dataset discovered
-→ dependencies verified
-→ CUDA preflight PASS
-→ tiny CUDA training PASS
-→ checkpoint PASS
-→ resume PASS
-→ full training completes
-→ persistent checkpoint survives
-→ reload PASS
-→ final evaluation PASS
-```
-with **zero manual source-code edits inside Kaggle**.
+No scientific claim is valid from a session that did not run the training; a coding session
+that reads cloud artifacts must verify them (checkpoint schema, step counts, config hash)
+before trusting them.

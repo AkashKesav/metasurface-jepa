@@ -2,6 +2,13 @@
 
 Project design document — v2
 
+> **Historical (v2, 384-D era) — superseded.** This document describes the original
+> three-channel/384-D design and its milestone ladder. The live architecture is the unified
+> 192-D occupancy–parameter–spectrum JEPA in
+> [`implementation/unified_jepa/architecture_v5.md`](implementation/unified_jepa/architecture_v5.md)
+> (authority), and the legacy code this document describes was retired on 2026-09-13
+> (`AGENTS.md` → Dated operator overrides). Kept for design rationale and history only.
+
 ---
 
 ## 0. Executive framing
