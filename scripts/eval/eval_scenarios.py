@@ -60,20 +60,18 @@ def _make_synthetic_batch(b, device):
 def _scenario_b_known_flags(b, device):
     """Scenario-B scalar-known flags for ARBITRARY batch size (Fix 5, spec §7).
 
-    Deterministic alternating rows, each with exactly one known scalar:
+    Deterministic rows, each with exactly one known scalar, rotating over
+    l -> h -> r so all three single-known variants appear (audit B11):
         row 0: [True,  False, False]
         row 1: [False, True,  False]
-        row 2: [True,  False, False]
-        row 3: [False, True,  False]
+        row 2: [False, False, True]
+        row 3: [True,  False, False]
         ...
-
-    This preserves the intended representative partial-known semantics (the
-    l- and h-known variants alternate) while remaining valid for any b >= 1.
     """
     rows = []
     for i in range(b):
         row = [False, False, False]
-        row[i % 2] = True  # alternate l-known / h-known
+        row[i % 3] = True  # rotate l-known / h-known / r-known
         rows.append(row)
     return torch.tensor(rows, dtype=torch.bool, device=device)
 
@@ -174,16 +172,20 @@ def evaluate_scenario(model, surrogate, occ, sv, spec, mask, scalar_known,
 
 @torch.no_grad()
 def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
-                       scalar_known=None, generator=None):
+                       scalar_known=None, generator=None, seed=None):
     """Real/null/shuffled goal dependence (Phase 4/5 MD §10).
 
     Fix 8: uses make_shuffled_spectrum (canonical derangement). Requires
     B >= 2 for a meaningful shuffled control; otherwise the shuffled gate is
     marked infeasible rather than claiming a comparison.
+    Audit B12: pass `seed` (or an explicit generator) so the derangement is
+    reproducible — an unseeded control changes run to run for B > 2.
     """
     if scalar_known is None:
         scalar_known = torch.ones(occ.shape[0], 3, dtype=torch.bool,
                                   device=device)
+    if generator is None and seed is not None:
+        generator = torch.Generator().manual_seed(int(seed))
     b = occ.shape[0]
 
     results = {}
@@ -403,6 +405,34 @@ def _load_train_representations(cfg, device, smoke, n_train=200):
         torch.cat(svs).to(device)
 
 
+def _collapse_metrics(model, occ, sv, spec, mask, scalar_known, device):
+    """Occupancy-collapse diagnostics (architecture_v5.md §8.3 check 11).
+
+    Audit B13: the predicted occupancy fraction uses the SAME definition as the
+    rest of the evaluator — the raw sigmoid probability thresholded at 0.5 —
+    and reports PER-SAMPLE variability, not only a global mean (a decoder that
+    predicts the majority class everywhere shows up as a near-constant
+    fraction across samples).
+    """
+    with torch.no_grad():
+        out = model(occ, sv, scalar_known, spec, mask)
+        prob = model.decode_occupancy_prob(
+            out["z_hat"], out["scalar_pred"],
+            scalar_known=scalar_known, scalar_values=sv)
+        bin_occ = (prob > 0.5).float()
+        per_sample = bin_occ.flatten(1).mean(dim=1)      # (B,)
+        frac = float(bin_occ.mean().item())
+    return {
+        "pred_occupancy_fraction": float(per_sample.mean().item()),
+        "pred_occupancy_fraction_std": float(
+            per_sample.std(unbiased=False).item()),
+        "pred_occupancy_fraction_min": float(per_sample.min().item()),
+        "pred_occupancy_fraction_max": float(per_sample.max().item()),
+        "all_empty": frac < 0.01,
+        "all_occupied": frac > 0.99,
+    }
+
+
 def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
     """Run all scenarios + diagnostics on the real validation split."""
     model, surrogate = _load_eval(cfg, ckpt_path, device)
@@ -427,7 +457,8 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
     results["scenario_A_pure_inverse"] = evaluate_scenario(
         model, surrogate, occ, sv, spec, M_a, sk_a, device, "A")
     results["scenario_A_rns"] = real_null_shuffled(
-        model, surrogate, occ, sv, spec, M_a, device, sk_a)
+        model, surrogate, occ, sv, spec, M_a, device, sk_a,
+        seed=cfg["train"].get("seed", 42) + 1)
 
     # Scenario B: partial-parameter (50% mask + some scalars known)
     # Fix 5 (spec §7): construct the known-flags pattern programmatically for
@@ -441,7 +472,8 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
     results["scenario_B_partial"] = evaluate_scenario(
         model, surrogate, occ, sv, spec, M_b, sk_b, device, "B")
     results["scenario_B_rns"] = real_null_shuffled(
-        model, surrogate, occ, sv, spec, M_b, device, sk_b)
+        model, surrogate, occ, sv, spec, M_b, device, sk_b,
+        seed=cfg["train"].get("seed", 42) + 2)
 
     # Scenario C: retrofit (25% mask + all scalars known)
     sk_c = torch.ones(b, 3, dtype=torch.bool, device=device)
@@ -450,7 +482,8 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
     results["scenario_C_retrofit"] = evaluate_scenario(
         model, surrogate, occ, sv, spec, M_c, sk_c, device, "C")
     results["scenario_C_rns"] = real_null_shuffled(
-        model, surrogate, occ, sv, spec, M_c, device, sk_c)
+        model, surrogate, occ, sv, spec, M_c, device, sk_c,
+        seed=cfg["train"].get("seed", 42) + 3)
 
     # Scalar dependence on a NON-EMPTY known-scalar stratum (Fix 9):
     # fully-masked occupancy + exactly one known scalar.
@@ -473,16 +506,10 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
     results["nn_baseline"] = nearest_neighbor_baseline(
         spec, train_specs, train_occ, train_sv, surrogate)
 
-    # Collapse check
-    out_c = model(occ, sv, sk_a, spec, M_a)
-    pred_occ = model.decode_geometry(
-        out_c["z_hat"], out_c["scalar_pred"],
-        scalar_known=sk_a, scalar_values=sv)[1]
-    results["collapse_check"] = {
-        "pred_occupancy_fraction": float(pred_occ.mean().item()),
-        "all_empty": float(pred_occ.mean().item()) < 0.01,
-        "all_occupied": float(pred_occ.mean().item()) > 0.99,
-    }
+    # Collapse check (audit B13): same occupancy definition as the evaluator
+    # (raw-sigmoid threshold) with per-sample fraction variability.
+    results["collapse_check"] = _collapse_metrics(
+        model, occ, sv, spec, M_a, sk_a, device)
 
     results["_data_mode"] = "SMOKE (synthetic)" if smoke else "REAL"
     return results

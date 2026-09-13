@@ -35,8 +35,11 @@ class ScenarioInputs:
         self.occ = occ
         self.sv = sv
         self.spec = spec
+        # Audit B11: masker.sample returns CPU tensors — move to the model
+        # device (the same contract the authoritative evaluator enforces).
         self.mask = BlockMasker(placement="random", grid=16, min_side=3,
-                                k_range=(1, 4), seed=100).sample(occ, mask_ratio)
+                                k_range=(1, 4), seed=100).sample(
+            occ, mask_ratio).to(device)
         self.scalar_known = scalar_known
         self.b = b
         self.device = device
@@ -49,10 +52,15 @@ class ScenarioInputs:
 
     @classmethod
     def scenario_b(cls, occ, sv, spec, b, device, mask_ratio=0.5):
-        """Partial-parameter conditioning: masked occupancy + some scalars known."""
-        sk = torch.tensor([[True, False, False],
-                           [False, True, False]], dtype=torch.bool,
-                          device=device)[:b]
+        """Partial-parameter conditioning: masked occupancy + exactly one known
+        scalar per row (l -> h -> r rotation).
+
+        Audit B11: reuse the authoritative evaluator's helper instead of the
+        old duplicated two-row tensor (which also never exercised an r-known
+        case).
+        """
+        from scripts.eval.eval_scenarios import _scenario_b_known_flags
+        sk = _scenario_b_known_flags(b, device)
         return cls(occ, sv, spec, mask_ratio, sk, b, device)
 
     @classmethod

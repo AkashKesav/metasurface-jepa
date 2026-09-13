@@ -712,25 +712,43 @@ def test_scenario_evaluator_uses_binary_deployed_occupancy():
 # --------------------------------------------------------------------------
 
 def test_scenario_b_known_flags_batch_size_safe():
-    """Fix 5 (spec §7): Scenario-B scalar-known flags must be constructible
-    for ARBITRARY batch size — the old fixed 2-row tensor sliced [:b] was only
-    safe for b <= 2. Verify B=2, 4, 5 produce [B,3] bool with deterministic
-    alternating known-scalar semantics."""
+    """Fix 5 (spec §7) + audit B11: Scenario-B scalar-known flags must be
+    constructible for ARBITRARY batch size, with exactly one known scalar per
+    row rotating over l -> h -> r (all three single-known variants appear)."""
     from scripts.eval.eval_scenarios import _scenario_b_known_flags
 
     for b in (2, 4, 5):
         sk = _scenario_b_known_flags(b, "cpu")
         assert sk.shape == (b, 3), f"B={b}: expected shape [{b},3], got {sk.shape}"
         assert sk.dtype == torch.bool, f"B={b}: expected bool dtype"
-        # Each row has exactly one known scalar, alternating l-known / h-known.
         for i in range(b):
             assert sk[i].sum().item() == 1, (
                 f"B={b} row {i}: expected exactly one known scalar, got {sk[i]}")
-            assert sk[i][i % 2].item() is True, (
-                f"B={b} row {i}: expected scalar {i % 2} known")
+            assert sk[i][i % 3].item() is True, (
+                f"B={b} row {i}: expected scalar {i % 3} known")
         # Deterministic: same construction twice gives identical flags.
         sk2 = _scenario_b_known_flags(b, "cpu")
         assert torch.equal(sk, sk2), "flags must be deterministic"
+    # The r-known variant must actually be exercised for b >= 3 (audit B11).
+    sk3 = _scenario_b_known_flags(3, "cpu")
+    assert sk3[2].tolist() == [False, False, True], sk3
+
+
+def test_scenario_inputs_mask_on_requested_device():
+    """Audit B11: ScenarioInputs must move its mask to the requested device
+    (masker.sample returns CPU tensors), and scenario B must be valid for any
+    batch size with the l/h/r-known rotation."""
+    from scripts.run_scenarios import ScenarioInputs
+    occ = (torch.rand(4, 1, 64, 64) > 0.5).float()
+    sv = torch.rand(4, 3) * 2 + 1
+    spec = torch.randn(4, 2, 301)
+
+    inputs = ScenarioInputs.scenario_b(occ, sv, spec, 4, "cpu")
+    assert inputs.mask.device.type == "cpu"
+    assert inputs.mask.shape == (4, 16, 16)
+    assert inputs.scalar_known.shape == (4, 3), (
+        f"b=4 must produce [4,3] flags, got {tuple(inputs.scalar_known.shape)}")
+    assert inputs.scalar_known[2].tolist() == [False, False, True]
 
 
 def test_scenario_inputs_shape():

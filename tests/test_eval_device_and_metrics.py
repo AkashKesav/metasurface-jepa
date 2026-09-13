@@ -103,6 +103,59 @@ def test_evaluate_scenario_occupancy_metrics_use_raw_probability():
     assert res["pred_occupancy_fraction"] < 0.01, res
 
 
+def test_real_null_shuffled_seeded_control_is_reproducible():
+    """Audit B12: the shuffled-spectrum control must be reproducible via an
+    explicit seed — an unseeded derangement changes run to run for B > 2."""
+    from scripts.eval.eval_scenarios import real_null_shuffled
+
+    class _SurrOut:
+        def __init__(self, prediction):
+            self.prediction = prediction
+
+    class _Surr(nn.Module):
+        """Deterministic stand-in: spectrum = first 602 geometry values."""
+
+        def forward(self, geo):
+            return _SurrOut(geo.flatten(1)[:, :602].reshape(-1, 2, 301))
+
+    model = _build_model()
+    occ, sv, spec = _batch(seed=7)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=5).sample(occ, 1.0)
+    sk = torch.zeros(2, 3, dtype=torch.bool)
+
+    a = real_null_shuffled(model, _Surr(), occ, sv, spec, M, "cpu", sk, seed=11)
+    b = real_null_shuffled(model, _Surr(), occ, sv, spec, M, "cpu", sk, seed=11)
+    assert a["shuffled"] == b["shuffled"], (
+        "the same seed must reproduce the same shuffled control")
+    assert "real_minus_shuffled" in a["gap"], a["gap"]
+
+
+def test_collapse_metrics_use_thresholded_raw_occupancy():
+    """Audit B13: collapse metrics must use the evaluator's occupancy definition
+    (raw sigmoid thresholded at 0.5) and report per-sample variability."""
+    from scripts.eval.eval_scenarios import _collapse_metrics
+
+    model = _build_model()
+    occ, sv, spec = _batch(seed=3)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=5).sample(occ, 1.0)
+    sk = torch.zeros(2, 3, dtype=torch.bool)
+
+    with torch.no_grad():
+        model.occupancy_decoder.head.bias.fill_(-100.0)
+    m_empty = _collapse_metrics(model, occ, sv, spec, M, sk, "cpu")
+    assert m_empty["all_empty"] is True, m_empty
+    assert m_empty["pred_occupancy_fraction"] == 0.0, m_empty  # thresholded
+    assert "pred_occupancy_fraction_std" in m_empty, m_empty
+
+    with torch.no_grad():
+        model.occupancy_decoder.head.bias.fill_(100.0)
+    m_full = _collapse_metrics(model, occ, sv, spec, M, sk, "cpu")
+    assert m_full["all_occupied"] is True, m_full
+    assert m_full["pred_occupancy_fraction"] == 1.0, m_full
+
+
 def test_scenario_masks_transferred_to_device():
     """Item 1: the scenario evaluator's masks must be on the model device
     (masker.sample returns CPU tensors). Regression: with a CUDA occupancy
