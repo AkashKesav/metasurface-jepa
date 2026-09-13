@@ -53,6 +53,68 @@ from train.engine import (
 )
 
 
+# Curriculum regime vocabulary -> ScalarMasker regime (documented alias,
+# audit B17: the config's "mixed" means an independent per-scalar draw).
+SCALAR_REGIME_ALIASES = {"mixed": "independent"}
+
+# Top-level config keys the unified trainer understands (audit B17: unknown
+# keys are warned about instead of being silently ignored).
+_KNOWN_TOP_LEVEL_KEYS = frozenset({
+    "scalar_convention", "hidden", "num_heads", "geo_depth", "predictor_depth",
+    "goal_tokens", "num_predictor_heads", "scalar_hidden", "n_film_blocks",
+    "spec_dim", "ema_momentum_start", "ema_momentum_end", "loss", "curriculum",
+    "staging", "weights", "data", "train", "_architecture_id",
+})
+
+
+def _validate_config(cfg):
+    """Validate the unified config against what the trainer actually reads.
+
+    Audit B17: invalid curriculum entries and incoherent staging were silently
+    ignored (e.g. scalar_regimes could name a regime ScalarMasker does not
+    implement). Raises ValueError on invalid values; returns a list of
+    non-fatal warnings (also printed).
+    """
+    from data.scalar_mask import ScalarMasker
+
+    warnings = []
+    unknown = sorted(set(cfg) - _KNOWN_TOP_LEVEL_KEYS)
+    if unknown:
+        warnings.append(f"unknown top-level config keys (ignored): {unknown}")
+
+    cur = cfg.get("curriculum", {})
+    for regime in cur.get("scalar_regimes", []):
+        if regime not in ScalarMasker.REGIMES and regime not in SCALAR_REGIME_ALIASES:
+            raise ValueError(
+                f"curriculum.scalar_regimes contains {regime!r}; valid regimes "
+                f"are {list(ScalarMasker.REGIMES)} (plus the documented alias "
+                f"{sorted(SCALAR_REGIME_ALIASES)})")
+    for name in ("train_mask_ratios", "eval_mask_ratios"):
+        bad = [r for r in cur.get(name, []) if not (0.0 <= float(r) <= 1.0)]
+        if bad:
+            raise ValueError(f"curriculum.{name} must be in [0, 1], got {bad}")
+    if any(float(r) <= 0.0 for r in cur.get("train_mask_ratios", [])):
+        warnings.append(
+            "curriculum.train_mask_ratios contains 0.0 — excluded at runtime: "
+            "the masked-token objective is undefined with no masked tokens")
+
+    staging_phase = str(cfg.get("staging", {}).get("phase", "")).upper()
+    lambda_phys = float(cfg.get("loss", {}).get("lambda_phys", 0.0))
+    if lambda_phys > 0 and staging_phase in ("A", "B"):
+        raise ValueError(
+            f"staging.phase={staging_phase!r} is a no-physics stage but "
+            f"loss.lambda_phys={lambda_phys} > 0 — make the staging explicit "
+            "(either set phase >= 'C' or keep lambda_phys = 0)")
+    if lambda_phys == 0 and staging_phase in ("C", "D", "E"):
+        warnings.append(
+            f"staging.phase={staging_phase!r} expects physics but "
+            "loss.lambda_phys = 0 — the physics loss stays inactive")
+
+    for w in warnings:
+        print(f"[config] WARNING: {w}")
+    return warnings
+
+
 def _ensure_spectrum_weights(path, device, allow_dummy=False):
     """Resolve the released spectrum encoder checkpoint.
 
@@ -524,6 +586,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     """
     from train.engine import collect_ema_state
 
+    _validate_config(cfg)  # audit B17: loud on invalid/incoherent configs
     set_seed(cfg["train"].get("seed", 42))
     device = device or resolve_device(cfg["train"].get("device", "cpu"))
     total_steps = cfg["train"].get("total_steps", 1500)
@@ -556,6 +619,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                 "Pass --use-synthetic-smoke for an explicit local smoke run.")
     # Synthetic data requires the explicit smoke flag (never an implicit fallback).
     use_synthetic = use_synthetic_smoke
+    # Audit B17: data.num_workers was silently ignored (hardcoded 0).
+    num_workers = int(cfg.get("data", {}).get("num_workers", 0))
 
     # --- model (Fix 6: released spectrum weights required in real mode) ---
     spec_weights = _ensure_spectrum_weights(
@@ -601,6 +666,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         lambda_phys=lambda_phys,
         gamma=loss_cfg.get("gamma", 1.0),
         eps=loss_cfg.get("eps", 1e-4),
+        # Audit B17: the Huber branch was unreachable — the config key was
+        # never read.
+        scalar_loss_type=loss_cfg.get("scalar_loss_type", "l1"),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
     ).to(device)
@@ -662,7 +730,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             seed=cfg["train"].get("seed", 42),
         )
         loader = DataLoader(ds, batch_size=train_cfg["batch_size"],
-                            shuffle=True, num_workers=0,
+                            shuffle=True, num_workers=num_workers,
                             collate_fn=collate_batch)
         # train_data is the loader in real mode so the training loop's
         # isinstance(train_data, DataLoader) dispatch works uniformly.
@@ -680,7 +748,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             seed=cfg["train"].get("seed", 42) + 1000,
         )
         vloader = DataLoader(vds, batch_size=train_cfg["batch_size"],
-                             shuffle=False, num_workers=0,
+                             shuffle=False, num_workers=num_workers,
                              collate_fn=collate_batch)
         for G, S in vloader:
             occ, sv = factorize_geometry(G)

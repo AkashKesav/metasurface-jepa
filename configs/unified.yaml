@@ -13,7 +13,7 @@ scalar_convention:
     r_atom: {channel: 0, divisor: 5.0, dense: false}
   factorized_scalar_representation: raw physical values (not rescaled)
 
-variant: unified
+# (no `variant` key: the unified architecture is the only live path, audit B17)
 hidden: 192
 num_heads: 6
 geo_depth: 6
@@ -35,6 +35,7 @@ loss:
   lambda_phys: 0.0      # physics loss — disabled until Phase 4 MD §4 activation
   gamma: 1.0            # VICReg variance hinge threshold
   eps: 1.0e-4           # VICReg numerical epsilon
+  scalar_loss_type: l1  # "l1" (default) or "huber" — wired (audit B17)
 
 # Mask curriculum (Phase 3 MD §4)
 curriculum:
@@ -45,8 +46,8 @@ curriculum:
   train_mask_ratios: [0.25, 0.5, 0.75, 1.0]   # low → medium → high → full
   train_mask_ratio_probs: [0.25, 0.35, 0.25, 0.15]
   # EVALUATION mask ratios: 0.0 IS included here as the genuinely unmasked
-  # reference condition (easy regime, separately reported — never pooled
-  # into the hard-stratum gate).
+  # reference condition. Consumed by scripts/diagnostics/run_guidance_gap_sweep.py
+  # (the trainer's validation uses the easy/hard strata below, audit B6/B17).
   eval_mask_ratios: [0.0, 0.25, 0.5, 0.75, 1.0]
   mask_placement: random      # "random" or "half_sensitivity" (architecture_v5.md §2)
   scalar_regimes: ["all_known", "all_unknown", "mixed"]
@@ -72,20 +73,20 @@ staging:
 
 weights:
   spectrum: data/metadit/weights/spec_encoder.pth
-  metadit: data/metadit/weights/metadit-small.bin
   surrogate: data/metadit/weights/surrogate_model.bin  # released forward EM surrogate (frozen, §1.6)
 
 data:
   train_split: data/metadit/split_data/train_set.mat
   val_split: data/metadit/split_data/val_set.mat
   max_train_samples: 0
-  num_workers: 0
-  use_synthetic: false   # set true only via explicit --use-synthetic-smoke CLI flag
+  num_workers: 0         # passed to the DataLoaders (audit B17: was ignored)
+  # Synthetic mode is CLI-only (--use-synthetic-smoke); there is deliberately
+  # no config key for it (audit B17).
 
 train:
   batch_size: 2
   grad_accum: 1
-  epochs: 1
+  # (no `epochs` key: the loop is step-based, audit B17)
   lr: 3.0e-4
   wd: 1.0e-4
   warmup_steps: 100

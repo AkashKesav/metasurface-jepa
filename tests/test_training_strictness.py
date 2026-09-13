@@ -156,6 +156,38 @@ def test_validate_reports_easy_and_hard_strata(tmp_path, monkeypatch, capsys):
     assert "L_total" in metrics["hard"] and "L_total" in metrics["easy"]
 
 
+def test_config_validation_rejects_unknown_scalar_regime():
+    """Audit B17: an unknown scalar regime must raise instead of being silently
+    ignored (only ScalarMasker.REGIMES and the documented 'mixed' alias are
+    valid)."""
+    from train_unified import _validate_config
+    cfg = _load_cfg()
+    cfg["curriculum"]["scalar_regimes"] = ["bogus_regime"]
+    with pytest.raises(ValueError, match="scalar_regimes"):
+        _validate_config(cfg)
+
+
+def test_config_validation_rejects_incoherent_staging():
+    """Audit B17: a no-physics staging phase with lambda_phys > 0 is
+    incoherent and must raise."""
+    from train_unified import _validate_config
+    cfg = _load_cfg()
+    cfg["staging"]["phase"] = "B"
+    cfg["loss"]["lambda_phys"] = 1.0
+    with pytest.raises(ValueError, match="staging"):
+        _validate_config(cfg)
+
+
+def test_shipped_config_validates_cleanly():
+    """The shipped config must validate with zero warnings (guards config drift)
+    and the documented 'mixed' regime alias must be accepted."""
+    from train_unified import _validate_config
+    cfg = _load_cfg()
+    assert _validate_config(cfg) == []
+    cfg["curriculum"]["scalar_regimes"] = ["all_known", "mixed"]
+    assert _validate_config(cfg) == []
+
+
 def test_scalar_masker_rng_evolves_across_batches():
     """Fix 3: scalar masking must use PERSISTENT RNG state — two mixed batches
     drawn from the SAME persistent bank must differ (RNG evolves), and the
