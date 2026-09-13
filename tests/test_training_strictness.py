@@ -203,16 +203,18 @@ def test_regime_logger_tracks_achieved_mask_fraction():
     assert "mask_fraction_achieved_mean" in rep, rep
     assert abs(rep["mask_fraction_achieved_mean"][0.25] - 0.42) < 1e-9, rep
 
-    # The achieved fraction is not the requested one (measured, not assumed).
+    # The achieved fraction tracks the requested one after calibration
+    # (operator decision 2026-09-13 / audit B20); before calibration this
+    # measured ~0.40 for a requested 0.5.
     occ = torch.rand(4, 1, 64, 64)
     masker = BlockMasker(placement="random", grid=16, min_side=3,
                          k_range=(1, 4), seed=7)
     achieved = [float((masker.sample(occ, 0.25) < 0.5).float().mean().item())
                 for _ in range(8)]
     mean_achieved = sum(achieved) / len(achieved)
-    assert abs(mean_achieved - 0.25) > 1e-6, (
-        "requested 0.25 vs achieved — documenting the nominal-vs-achieved gap; "
-        f"got {mean_achieved:.3f}")
+    assert abs(mean_achieved - 0.25) <= 0.03, (
+        "requested 0.25 vs achieved — calibrated coverage must track the "
+        f"request; got {mean_achieved:.3f}")
 
 
 def test_ema_gradient_guard_covers_surrogate():

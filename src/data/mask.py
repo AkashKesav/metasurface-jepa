@@ -40,14 +40,8 @@ def _window_scores(sens, h, w):
     return windows.sum(dim=(-1, -2))
 
 
-def random_masks(rng, batch_size, ratio, grid=DEFAULT_GRID, min_side=DEFAULT_MIN_SIDE,
-                 k_range=DEFAULT_K_RANGE):
-    """Random-placement block masks. Returns M (B, grid, grid), 1 = visible."""
-    if ratio <= 0.0:
-        # 0% mask: every position visible (1 = visible, 0 = masked).
-        return torch.ones(batch_size, grid, grid, dtype=torch.float32)
-    if ratio >= 0.999:
-        return torch.zeros(batch_size, grid, grid, dtype=torch.float32)
+def _draw_random_mask(rng, batch_size, ratio, grid, min_side, k_range):
+    """One uncorrected random-placement draw (block masks, 1 = visible)."""
     k = int(torch.randint(k_range[0], k_range[1] + 1, (), generator=rng).item())
     shapes = _block_shapes(k, ratio, grid, min_side, rng)
     m = torch.ones(batch_size, grid, grid, dtype=torch.float32)
@@ -57,6 +51,38 @@ def random_masks(rng, batch_size, ratio, grid=DEFAULT_GRID, min_side=DEFAULT_MIN
         for b in range(batch_size):
             m[b, top[b]:top[b] + h, left[b]:left[b] + w] = 0.0
     return m
+
+
+def random_masks(rng, batch_size, ratio, grid=DEFAULT_GRID, min_side=DEFAULT_MIN_SIDE,
+                 k_range=DEFAULT_K_RANGE, tolerance=0.02, max_attempts=50):
+    """Random-placement block masks. Returns M (B, grid, grid), 1 = visible.
+
+    Operator decision 2026-09-13 (audit B20): the achieved masked fraction is
+    CALIBRATED toward the requested ratio. A single uncorrected draw drifts —
+    the min-side clamp inflates small blocks and independently placed blocks
+    overlap, so the achieved coverage is neither the requested ratio nor
+    predictable from it. The first draw within `tolerance` (fraction of the
+    grid) is accepted; if none qualifies after `max_attempts`, the closest draw
+    is returned. Every draw consumes the same generator, so a fixed seed stays
+    reproducible, and the trainer logs the achieved fraction per bucket, so a
+    miss is visible rather than silent.
+    """
+    if ratio <= 0.0:
+        # 0% mask: every position visible (1 = visible, 0 = masked).
+        return torch.ones(batch_size, grid, grid, dtype=torch.float32)
+    if ratio >= 0.999:
+        return torch.zeros(batch_size, grid, grid, dtype=torch.float32)
+
+    best, best_err = None, None
+    for _ in range(max_attempts):
+        m = _draw_random_mask(rng, batch_size, ratio, grid, min_side, k_range)
+        achieved = float((m < 0.5).float().mean().item())
+        err = abs(achieved - ratio)
+        if best is None or err < best_err:
+            best, best_err = m, err
+        if err <= tolerance:
+            return m
+    return best
 
 
 def sensitivity_masks(rng, geometry, ratio, surrogate, grid=DEFAULT_GRID,
