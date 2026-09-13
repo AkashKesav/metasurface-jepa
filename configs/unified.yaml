@@ -36,18 +36,20 @@ loss:
   lambda_occ: 1.0       # occupancy BCEWithLogits on masked pixels (§4.1,
                         # operator decision 2026-09-13: the decoder must be
                         # supervised even while lambda_phys = 0)
-  lambda_phys: 0.1      # physics loss ACTIVE (operator decision 2026-09-13).
-                        # Stage C, "tiny training with small physics loss"
-                        # (03_training_and_objective.md §5), ramped from zero.
-                        # The value sits at the low end of the diagnostic
-                        # protocol's sweep range {0.01, 0.1, 1, 10}
-                        # (scripts/diagnostics/protocol_v1/step7_lambda_sweep.py);
-                        # raise it only on evidence, one change per commit.
-                        # Rationale: L_phys is the only term that supervises the
-                        # DECODED GEOMETRY against the true spectrum, so it is the
-                        # mechanism that must make the conditioning content-
-                        # sensitive rather than a mere presence switch (see the
-                        # 20k-step finding in checkpoints/unified/REPORT.md §9.3).
+  lambda_phys: 3.32     # physics loss WEIGHT, set from the calibrated sweep of
+                        # 2026-09-13 (checkpoints/unified/REPORT.md §11). Five arms
+                        # at 10k steps each, scored by the 32-sample gate:
+                        #   lam=0      real 0.2901   (control)
+                        #   lam=0.0335 real 0.4390   SIGNIFICANTLY WORSE than no physics (t=+3.46)
+                        #   lam=0.1    real 0.3995   SIGNIFICANTLY WORSE than no physics (t=+2.57)
+                        #   lam=0.369  real 0.2235   better (t=-2.27)
+                        #   lam=3.3201 real 0.1679   best; beats every arm (t<=-2.48)
+                        # The value is the 50% gradient-share point from the
+                        # calibration (median across modules); the curve was still
+                        # IMPROVING at the top of the swept range, so this is a
+                        # LOWER BOUND on the optimum, not a located maximum — a
+                        # further sweep upward is the recorded next step, not a
+                        # silent further increase here.
   gamma: 1.0            # VICReg variance hinge threshold
   eps: 1.0e-4           # VICReg numerical epsilon
   scalar_loss_type: l1  # "l1" (default) or "huber" — wired (audit B17)
@@ -81,13 +83,13 @@ curriculum:
 
 # Physics loss staging (Phase 3 MD §5, extended Phase 4 MD §4.1)
 staging:
-  phase: C             # A=smoke, B=tiny no-phys, C=tiny small-phys, D=controlled (CFG+ramp), E=scale
-                       # Operator decision 2026-09-13: B -> C now that the
-                       # pre-activation checks are green (physics_use_ste verified
-                       # load-bearing against the released surrogate, physics-alive
-                       # assertion in preflight, degenerate-spectrum guard measured
-                       # as unreachable). See checkpoints/unified/REPORT.md §7.
-  lambda_phys_ramp_steps: 500  # ramp lambda_phys 0 -> 0.1 over the first 500 steps
+  phase: D             # A=smoke, B=tiny no-phys, C=tiny small-phys, D=controlled (CFG+ramp), E=scale
+                       # Operator decision 2026-09-13: C -> D for the full-epoch
+                       # run on the complete training split (70k steps ~= 1 epoch
+                       # at batch 2). The gates now pass with a properly-powered
+                       # evaluation (§11), but a single full epoch is a controlled
+                       # run, not "scale" — E is reserved.
+  lambda_phys_ramp_steps: 500  # ramp lambda_phys 0 -> 3.32 over the first 500 steps
                        # (03_training_and_objective.md §5: "Ramp lambda_phys from
                        # zero. Do not immediately turn on a large physics loss.")
   physics_use_ste: true      # REQUIRED with lambda_phys > 0, and now enforced:
