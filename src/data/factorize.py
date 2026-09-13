@@ -56,12 +56,20 @@ def factorize_geometry(geometry):
     # indistinguishable from an unoccupied one and occupancy recovery would
     # silently misclassify pixels for that sample. Physically these are positive
     # dimensions, so this is an asserted invariant rather than a silent one.
-    assert (h > 0).all() and (r > 0).all(), (
-        "factorize_geometry assumes h_atom and r_atom are strictly positive "
-        "(occupancy recovery relies on nonzero channel values on occupied "
-        "pixels) — got a sample with a zero or negative scalar; occupancy "
-        "recovery would be unreliable for this sample."
-    )
+    # The invariant is conditional on the sample actually CONTAINING an occupied
+    # pixel: an all-empty pattern is a legitimate sample (and a documented
+    # collapse mode) whose h/r are exactly 0 by construction (amax over an
+    # all-zero channel), with no occupied pixels that could be misclassified
+    # (audit B8).
+    has_occupied = occ.view(occ.shape[0], -1).any(dim=1)  # (B,)
+    if has_occupied.any():
+        assert (h[has_occupied] > 0).all() and (r[has_occupied] > 0).all(), (
+            "factorize_geometry assumes h_atom and r_atom are strictly positive "
+            "for samples with occupied pixels (occupancy recovery relies on "
+            "nonzero channel values on occupied pixels) — got a sample with a "
+            "zero or negative scalar; occupancy recovery would be unreliable "
+            "for that sample."
+        )
 
     scalars = torch.stack([l, h, r], dim=-1)  # (B, 3)
     return occ, scalars

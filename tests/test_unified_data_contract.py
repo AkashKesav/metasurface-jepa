@@ -80,6 +80,22 @@ def test_factorize_occupancy_binary():
     assert occ.dtype == G.dtype
 
 
+def test_factorize_all_empty_occupancy_is_legal():
+    """Audit B8: an all-empty occupancy pattern is a legitimate sample (and a
+    documented collapse mode). The h/r positivity invariant applies only to
+    samples that actually contain occupied pixels — for an empty pattern both
+    are exactly 0 by construction (amax over an all-zero channel), and the old
+    unconditional assert crashed on it."""
+    G = torch.zeros(2, 3, 64, 64)
+    G[:, 2] = 1.5                       # l_lattice/3 constant everywhere
+    occ, sv = factorize_geometry(G)
+    assert occ.sum() == 0.0
+    assert torch.allclose(sv[:, 0], torch.full((2,), 4.5))
+    assert torch.allclose(sv[:, 1:], torch.zeros(2, 2))
+    G2 = assemble_geometry(occ, sv)
+    assert torch.allclose(G2, G, atol=1e-6)
+
+
 def test_factorize_rejects_wrong_channels():
     with pytest.raises(AssertionError):
         factorize_geometry(torch.randn(2, 1, 64, 64))
