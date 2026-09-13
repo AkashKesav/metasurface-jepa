@@ -1,13 +1,24 @@
 # Unified 192-D JEPA — cloud run report (Kaggle)
 
-**CURRENT STATUS: PIPELINE VERIFIED — verification-scale run PASSED on real data + released
-weights + GPU. The full run and the acceptance gate are recorded in §4 when they land. No
-scientific claim is made by this report.** The gate is the per-scenario hard-stratum
-real-vs-shuffled physics-consistency gap (`architecture_v5.md` §8.3 check 8), which requires a
-completed training run and is reported per scenario, never pooled.
+**CURRENT STATUS: NEGATIVE RESULT — the acceptance gate FAILS on the hard stratum.**
+The full 1500-step run completed and was evaluated per scenario; on scenario A (pure inverse
+design = full occupancy mask + all scalars unknown) the model is **no better with the true
+spectrum than with a shuffled one** (`real 0.6336` vs `shuffled 0.6332`, gate criterion
+`real < shuffled` → **false**), the decoded design is **deterministic under a perturbed target
+spectrum** (`diversity_A = 0.0`), scalar conditioning is **exactly zero** in the one-known
+stratum (`0.6261729598045349` identical for real and shuffled), and the trivial L1
+nearest-neighbour retrieval baseline is **~8.5× better** than the model (`0.0744` vs `0.6336`).
+Full numbers in §4. The pipeline itself is verified (§3).
 
-This file is the CLOUD_TRAINING.md §3 sync-back record for the first unified 192-D cloud session
-(2026-09-13).
+**This is recorded, not acted on.** Per `AGENTS.md` → *If something fails*, the response to a
+failed gate is to record the observed numbers and escalate for a scope decision — never to add
+mechanisms or loosen a threshold to make it pass. See §4.3 for the decision point.
+
+The gate is the per-scenario hard-stratum real-vs-shuffled physics-consistency gap
+(`architecture_v5.md` §8.3 check 8), reported per scenario and never pooled.
+
+This file is the CLOUD_TRAINING.md §3 sync-back record for the unified 192-D cloud session of
+2026-09-13.
 
 ---
 
@@ -16,8 +27,8 @@ This file is the CLOUD_TRAINING.md §3 sync-back record for the first unified 19
 | | |
 |---|---|
 | Platform | Kaggle (kernel, private), Tesla **P100-PCIE-16GB**, Internet ON |
-| Code package | Kaggle dataset `anosvol/metasurface-jepa-192d-unified-code` v3 |
-| Commit | `4deab8a44c9e5011c7ab95f350109851abea4e88` (branch `work-192d`) |
+| Code package | Kaggle dataset `anosvol/metasurface-jepa-192d-unified-code` — **v3** for the verification run, **v4** for the full run |
+| Commit | `4deab8a44c9e5011c7ab95f350109851abea4e88` (verification, §3) · `330f9419451336475aeaa492de6f35614e1c3b0b` (full run + gate, §4) — branch `work-192d` |
 | Config | `configs/unified.yaml`, sha256 `e6cb5880c3ef65f6c3cbce231a96d6684dbfd82cebf1f57e86bd0f2265c7b375` |
 | Data (staged, symlinked) | Kaggle dataset `anosvol/metadit-aaai2026-staging` |
 | Kernels | `anosvol/metasurface-jepa-192d-verify-run` (v3), `anosvol/metasurface-jepa-192d-full-run` |
@@ -48,7 +59,7 @@ torch that does not match the validated pin.
 
 ---
 
-## 2. Defects the first cloud run surfaced (both fixed before the passing run)
+## 2. Defects the cloud runs surfaced (all fixed before the evaluated run)
 
 1. **Provenance false alarm (line endings).** The first package pinned a config sha256 computed
    from the **Windows working tree (CRLF)**; the package carries the **committed blob (LF)**.
@@ -61,14 +72,27 @@ torch that does not match the validated pin.
    rather than **gradient tracking**, contradicting its own message ("run this path under
    eval/no_grad for diagnostics"). It therefore refused `preflight()`'s hard-assembly
    diagnostics, which legitimately run in train mode, and the preflight exited 1. B18 had added
-   the guard without updating its one existing legitimate caller, and nothing caught it locally
-   because the preflight needs the real splits and released weights, which the dev machine does
-   not stage. Fix (`4deab8a`): predicate is `not self.training or not torch.is_grad_enabled()`
-   (a gradient-enabled training forward is still refused), plus a `no_grad` wrapper on the
-   preflight's diagnostic block, with regression tests for both directions.
+   the guard without updating its one existing legitimate caller, and nothing caught it
+   locally because the preflight needs the real splits and released weights, which the dev
+   machine does not stage. Fix (`4deab8a`): predicate is
+   `not self.training or not torch.is_grad_enabled()` (a gradient-enabled training forward is
+   still refused), plus a `no_grad` wrapper on the preflight's diagnostic block, with regression
+   tests for both directions.
+3. **B22 — the evaluation aborted on a device mismatch.** `derangement_permutation` forwarded the
+   *target* device to `torch.randperm` while using the caller's generator; torch requires them to
+   match, so the evaluator's seeded shuffled control (CPU generator + CUDA target, audit B12)
+   raised `Expected a 'cuda' device type for generator but found 'cpu'` and killed
+   `eval_scenarios.py` before it produced a single number. Fix (`9753265`): draw on the
+   generator's own device, then move the permutation to the target. The pre-fix failure is
+   CUDA-only, so the regression test that exercises it is `skipif`-gated and skips loudly here.
+4. **B23 — the guidance-gap sweep never ran.** `run_guidance_gap_sweep.py` called
+   `train.engine.load_checkpoint(..., strict_model=True, strict_objective=False)` — the TRAINING
+   resume API, which requires an objective/optimizer/scheduler and has no `strict_model`
+   argument — raising `TypeError`. Fix (`330f941`): a testable `load_eval_model()` mirroring the
+   evaluator's loader (strict model state + EMA target state).
 
-Recorded in `docs/implementation/unified_jepa/AUDIT_REPORT_192D.md` (rows for the guard) —
-B21 is in §2 of that report.
+B21 is recorded in `docs/implementation/unified_jepa/AUDIT_REPORT_192D.md` §2; B22/B23 are in
+their commit messages. Every fix is its own commit with a regression test.
 
 ---
 
@@ -132,37 +156,97 @@ Retrieved locally via `kaggle kernels output anosvol/metasurface-jepa-192d-verif
 
 ---
 
-## 4. Full run + acceptance gate
+## 4. Full run + acceptance gate — **the gate fails**
 
-Recorded here once the `anosvol/metasurface-jepa-192d-full-run` kernel completes:
+Kernel `anosvol/metasurface-jepa-192d-full-run` (version 2), code commit
+`330f9419451336475aeaa492de6f35614e1c3b0b`. All stages exited 0: preflight 24 s, full run
+**1500 steps in 152 s**, `eval_scenarios.py --scenario all` 12 s, guidance-gap sweep 3 s.
+Checkpoints `final.pt` / `latest.pt`, 162,953,994 bytes each.
 
-- full run: `train_unified.py --config configs/unified.yaml --device cuda` (1500 steps)
-- gate: `eval_scenarios.py --scenario all --device cuda` — read **A / B / C separately**, and
-  the **hard stratum** real-vs-shuffled physics-consistency gap; never a pooled number
-- `run_guidance_gap_sweep.py` mask-ratio curve (§20.3)
+### 4.1 The gate (`eval_scenarios.py`, real validation split)
+
+Gate criterion in the evaluator: `gate = real_spectrum_error < shuffled_spectrum_error`
+(lower is better). `shuffled` conditions the model on a deranged spectrum, so a model that
+actually uses the spectrum must do worse on it.
+
+| scenario | real | null | shuffled | shuffled − real | gate |
+|---|---|---|---|---|---|
+| **A** — pure inverse design (**hard stratum**: full occupancy mask, all scalars unknown) | 0.6336 | 0.6420 | 0.6332 | **−0.00039** | **FAIL** |
+| B — partial parameters | 0.3418 | 0.3455 | 0.3436 | +0.00185 | pass |
+| C — retrofit | 0.3124 | 0.3124 | 0.3087 | −0.00365 | **FAIL** |
+
+Scenario B's pass is a technicality: a +0.0019 margin on a 0.34 error (~0.5 %), and the
+`real_minus_null` gap there is the same order. The scenario the design's gates apply to is A,
+and it fails.
+
+### 4.2 Corroborating diagnostics (same evaluation)
+
+- **Generative diversity — fails outright.** `diversity_A`: `pairwise_spectrum_diversity = 0.0`,
+  `deterministic = true`. Perturbing the target spectrum does not move the decoded design at all.
+- **Scalar dependence — zero.** `scalar_dependence_one_known`: real and shuffled are
+  **bit-identical** (`0.6261729598045349`). `scalar_dependence_two_known`: `0.3237603` vs
+  `0.3237450` (≈1.5e-5). Neither gate passes; the scalars are not influencing the decode.
+- **Retrieval baseline — the model loses badly.** `nn_baseline` (L1 nearest real training
+  spectrum → its real geometry): mean error `0.0744`, best `0.0486`, versus the model's `0.6336`
+  on scenario A — the trivial baseline is **~8.5× better**. No claim of useful inverse design
+  survives this comparison.
+- **Occupancy head — partially working, partially collapsed.** Scenario A masked-region
+  IoU `0.684`, F1 `0.812` (precision `0.729`, recall `0.916`) — the decoder does learn occupancy
+  structure, so the failure is specifically in the *conditioning*, not the decoder.
+  `collapse_check`: `pred_occupancy_fraction` `0.5012 ± 0.0066` against a true `0.3989` —
+  near-constant and biased high (not all-empty, but low variability).
+- Guidance-gap sweep (§20.3) ran clean (`exit=0`); see `guidance_gap_sweep.log`.
+
+### 4.3 Reading this honestly (stated as context, not as an excuse)
+
+- **Scale.** 1500 steps × batch 2 = **3,000 samples**, ≈2 % of a single epoch (the train split is
+  ≈140 k samples). The run is a pipeline-scale run, not a converged model.
+- **Physics was off.** `lambda_phys = 0.0` (staging B) throughout, so nothing in this run
+  optimized spectrum consistency directly; the only pathway tying the spectrum to the design was
+  `L_inv` through the target latent.
+- **The invariance objective had not aligned anything yet.** Validation reported
+  `raw_cos_err = 1.0` (predicted and target latents orthogonal) at steps 50 and 100.
+- **What this does and does not establish.** It establishes that *this* configuration, at this
+  scale, does not pass the gate. It does **not** establish that the architecture cannot — that
+  would require a converged run. Both readings are hypotheses at this point.
+
+**Decision point (`AGENTS.md` → If something fails).** The failure is recorded here; the next
+step is the operator's call among (a) diagnose and retry within scope — most plausibly train to
+convergence and/or activate the physics stage, as separate one-change commits; (b) a scope or
+threshold decision; or (c) stop the line. No mechanism is to be added, and no threshold moved,
+in order to make this gate pass.
 
 ---
 
 ## 5. Honest verification status
 
 - **Verified:** the real-data pipeline runs end to end on a cloud GPU — data staging, released
-  weights, frozen-component gradient ownership, 150 training steps, EMA updates, stratified
-  validation, calibrated masking, checkpoint write/read path.
-- **Not verified:** anything scientific. No claim is made that the representation is useful, that
-  physics consistency beats the shuffled control, that scalars are used *correctly*, or that the
-  decoder avoids collapse. Those are the §8 gates and they need the full run plus
-  `eval_scenarios.py`. A completed run is not a result (AGENTS.md Standing Rule 8).
-- **Local gate for the same commit:** `python -m pytest tests/ -q --tb=line` → **275 passed,
-  22 skipped, 0 failed**; `scripts/preflight/repo_static_audit.py` → 0 findings.
+  weights, frozen-component gradient ownership, training to the configured schedule, EMA updates,
+  stratified validation, calibrated masking, checkpoint write, and **both** evaluators
+  (`eval_scenarios.py`, `run_guidance_gap_sweep.py`) against the produced checkpoint.
+- **Measured and negative:** the §8 gates this project is judged by. Scenario A (hard stratum)
+  fails, generative diversity is exactly zero, scalar dependence is exactly zero, and a trivial
+  retrieval baseline beats the model by ~8.5×. See §4. These are results — negative ones — and
+  they are the reason this report carries a NEGATIVE banner rather than a claim.
+- **Not established:** that the architecture cannot pass these gates. This run is ~2 % of an
+  epoch with `lambda_phys = 0`; whether the failure is scale/staging or something deeper is a
+  hypothesis, and testing it is the operator's call (§4.3).
+- **Local gate for the same commit:** `python -m pytest tests/ -q --tb=line` → **278 passed,
+  23 skipped, 0 failed**; `scripts/preflight/repo_static_audit.py` → 0 findings.
+  (One skip is a CUDA-gated regression test for B22 — see §2.)
 
 ## 6. Resume / repo hygiene
 
 - Checkpoint files are **not** committed (`checkpoints/**/*.pt` is gitignored); only this report
   is tracked.
-- To reproduce or continue: dataset `anosvol/metasurface-jepa-192d-unified-code` (v3) +
-  `anosvol/metadit-aaai2026-staging`, kernel `anosvol/metasurface-jepa-192d-full-run`.
+- To reproduce or continue: dataset `anosvol/metasurface-jepa-192d-unified-code` (**v4**;
+  commits `4deab8a` = verification run, `330f941` = full run) + `anosvol/metadit-aaai2026-staging`,
+  kernels `anosvol/metasurface-jepa-192d-verify-run` (v3) and
+  `anosvol/metasurface-jepa-192d-full-run` (v2).
   `--resume checkpoints/unified/latest.pt` works if a future session re-attaches the run's
   output directory; a fresh full run is the clean default.
-- **Deviation to be aware of:** the code package is pinned at `4deab8a`, while the branch head is
-  `191e5fc`. The difference is documentation only (`AUDIT_REPORT_192D.md` B21 row + test count);
-  no code differs. Future packages should be rebuilt from head to keep the pin exact.
+- **Cost note for planning:** the full 1500-step run took **152 s** on a P100 (the frozen
+  surrogate is not in the loop while `lambda_phys = 0`), so longer schedules — the most obvious
+  next experiment (§4.3a) — are cheap; the fixed cost per session is the ~205 s torch pin install.
+- **Deviation to be aware of:** the evaluated package is pinned at `330f941`, the branch head at
+  the time of writing. Rebuild the package from head for any further run so the pin stays exact.
