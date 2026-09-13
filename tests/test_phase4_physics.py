@@ -183,13 +183,29 @@ def test_decode_geometry_ste():
 # Occupancy decoder contract (architecture_v5.md §4.1)
 # --------------------------------------------------------------------------
 
+def _film_input(values, known=None):
+    """Decoder conditioning in the §3.2 convention: [value, known-flag] x 3.
+
+    `known=None` means every scalar is observed (flags 1) — the explicit-array
+    test callers' convention; the model's own decode paths derive flags from
+    the batch's scalar_known instead.
+    """
+    if known is None:
+        known = torch.ones(values.shape[0], 3, dtype=torch.bool,
+                           device=values.device)
+    kf = known.to(values.dtype)
+    return torch.stack([values[:, 0], kf[:, 0],
+                        values[:, 1], kf[:, 1],
+                        values[:, 2], kf[:, 2]], dim=-1)
+
+
 def test_occupancy_decoder_output_shape():
     """Decoder output is occupancy logits [B,1,64,64] only — no 3-ch head."""
     from decoders.occupancy_decoder import OccupancyDecoder
     dec = OccupancyDecoder(hidden=192, base_dim=96, scalar_hidden=128)
     z = torch.randn(2, 256, 192)
     scalars = torch.tensor([[2.5, 0.8, 4.0], [2.8, 1.0, 4.2]])
-    occ_logits = dec(z, scalars)
+    occ_logits = dec(z, _film_input(scalars))
     assert occ_logits.shape == (2, 1, 64, 64), (
         f"expected [B,1,64,64], got {tuple(occ_logits.shape)}")
 
@@ -211,7 +227,7 @@ def test_occupancy_decoder_accepts_256_tokens():
     dec = OccupancyDecoder(hidden=192)
     z = torch.randn(1, 256, 192)
     scalars = torch.tensor([[2.5, 0.8, 4.0]])
-    out = dec(z, scalars)
+    out = dec(z, _film_input(scalars))
     assert out.shape == (1, 1, 64, 64)
 
 
@@ -234,8 +250,8 @@ def test_occupancy_decoder_scalar_sensitivity():
     s1 = torch.tensor([[2.5, 0.8, 4.0]])
     s2 = torch.tensor([[4.0, 1.5, 8.0]])
     with torch.no_grad():
-        o1 = dec(z, s1)
-        o2 = dec(z, s2)
+        o1 = dec(z, _film_input(s1))
+        o2 = dec(z, _film_input(s2))
     # With un-zeroed FiLM, different scalars must give different outputs.
     assert not torch.allclose(o1, o2, atol=1e-6), (
         "decoder output must depend on scalar conditioning")
@@ -254,8 +270,8 @@ def test_occupancy_decoder_film_identity_init():
     s1 = torch.tensor([[2.5, 0.8, 4.0]])
     s2 = torch.tensor([[250.0, 80.0, 400.0]])  # huge scale — identity FiLM ignores
     with torch.no_grad():
-        o1 = dec(z, s1)
-        o2 = dec(z, s2)
+        o1 = dec(z, _film_input(s1))
+        o2 = dec(z, _film_input(s2))
     # At init, FiLM is identity: scaling scalars must not change the output.
     assert torch.allclose(o1, o2, atol=1e-5), (
         "zero-init FiLM must be an identity modulation at init")
@@ -287,7 +303,7 @@ def test_occupancy_decoder_spatial_order_preserved():
     z = torch.zeros(1, 256, 192)
     for i in range(256):
         z[0, i, 0] = (i + 1) / 257.0
-    out = dec(z, scalars)
+    out = dec(z, _film_input(scalars))
     assert out.shape == (1, 1, 64, 64)
     # The reshape (B,256,D) → (B,16,16,D) → pixels is deterministic and
     # position-preserving: pixel (r,c) receives token r*16+c. Verify by
@@ -318,11 +334,13 @@ def test_occupancy_decoder_effective_scalars_known_vs_predicted():
     scalar_values = torch.tensor([[3.0, 1.0, 9.0]])    # known ground truth
     scalar_known = torch.ones(1, 3, dtype=torch.bool)  # all known
 
-    # Effective scalars per architecture_v5.md §4.1.
+    # Effective scalars per architecture_v5.md §4.1, with the §3.2 known/unknown
+    # flags (audit B10).
     effective = torch.where(scalar_known, scalar_values, scalar_pred)
+    unknown_flags = torch.zeros_like(scalar_known)
     with torch.no_grad():
-        out_known = dec(z, effective)
-        out_pred = dec(z, scalar_pred)
+        out_known = dec(z, _film_input(effective, scalar_known))
+        out_pred = dec(z, _film_input(scalar_pred, unknown_flags))
 
     # Known values must flow into the decoder (different from the prediction).
     assert not torch.allclose(out_known, out_pred, atol=1e-6), (
@@ -333,10 +351,38 @@ def test_occupancy_decoder_effective_scalars_known_vs_predicted():
     sk_mixed[:, 0] = True  # l known, h/r unknown
     effective_mixed = torch.where(sk_mixed, scalar_values, scalar_pred)
     with torch.no_grad():
-        out_mixed = dec(z, effective_mixed)
+        out_mixed = dec(z, _film_input(effective_mixed, sk_mixed))
     # The mixed case must match neither all-known nor all-predicted exactly.
     assert not torch.allclose(out_mixed, out_known, atol=1e-6)
     assert not torch.allclose(out_mixed, out_pred, atol=1e-6)
+
+
+def test_occupancy_decoder_known_flag_distinguishes_equal_values():
+    """Audit B10: the decoder conditioning carries the known/unknown flag.
+
+    A known value and a predicted value of the same magnitude must not be
+    indistinguishable to the FiLM path (the encoder already signals missingness
+    this way, §3.2).
+    """
+    from decoders.occupancy_decoder import OccupancyDecoder
+    torch.manual_seed(0)
+    dec = OccupancyDecoder(hidden=192)
+    torch.manual_seed(123)
+    with torch.no_grad():
+        for block in (dec.block1, dec.block2):
+            block.film.weight.normal_(0.0, 0.5)
+            block.film.bias.normal_(0.0, 0.5)
+
+    z = torch.randn(1, 256, 192)
+    v = torch.tensor([[2.75, 0.75, 4.25]])
+    known = torch.tensor([[True, True, True]])
+    unknown = torch.tensor([[False, False, False]])
+    with torch.no_grad():
+        a = dec(z, _film_input(v, known))
+        b = dec(z, _film_input(v, unknown))
+    assert not torch.allclose(a, b, atol=1e-6), (
+        "a known scalar and a predicted scalar with the same value must not be "
+        "indistinguishable to the decoder FiLM (B10)")
 
 
 def test_decode_geometry_substitutes_known_scalars():

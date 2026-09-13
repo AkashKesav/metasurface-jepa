@@ -347,6 +347,34 @@ class UnifiedJEPA(nn.Module):
             return torch.where(scalar_known, scalar_values, scalar_pred)
         return scalar_pred
 
+    def _effective_scalar_input(self, scalar_pred, scalar_known=None,
+                                scalar_values=None):
+        """6-dim decoder conditioning ([value, known-flag] x 3, §3.2 convention).
+
+        Values follow the §4.1 decode-time rule: the true value where known, the
+        prediction where unknown. The flags distinguish a known value from a
+        predicted value of the same magnitude (audit B10). ``scalar_known=None``
+        means no scalar is observed, so all flags are 0.
+        """
+        values = self._effective_scalars(scalar_pred, scalar_known,
+                                         scalar_values)
+        if scalar_known is None:
+            flags = torch.zeros_like(values)
+        else:
+            flags = scalar_known.to(values.dtype)
+        return torch.stack([
+            values[:, 0], flags[:, 0],
+            values[:, 1], flags[:, 1],
+            values[:, 2], flags[:, 2],
+        ], dim=-1)
+
+    def decode_occupancy_logits(self, z_hat, scalar_pred, scalar_known=None,
+                                scalar_values=None):
+        """Raw occupancy logits [B,1,64,64] with §3.2 conditioning (audit B10)."""
+        scalars = self._effective_scalar_input(scalar_pred, scalar_known,
+                                               scalar_values)
+        return self.occupancy_decoder(z_hat, scalars)
+
     def decode_occupancy_prob(self, z_hat, scalar_pred, scalar_known=None,
                               scalar_values=None):
         """Raw sigmoid occupancy probability [B,1,64,64] — no thresholding, no
@@ -356,9 +384,8 @@ class UnifiedJEPA(nn.Module):
         evaluator); it is never the deployed geometry — deployment uses
         decode_geometry's retained, hard-thresholded occupancy (audit B7).
         """
-        scalars = self._effective_scalars(scalar_pred, scalar_known,
-                                          scalar_values)
-        return torch.sigmoid(self.occupancy_decoder(z_hat, scalars))
+        return torch.sigmoid(self.decode_occupancy_logits(
+            z_hat, scalar_pred, scalar_known, scalar_values))
 
     def decode_geometry(self, z_hat, scalar_pred, occ_input=None, mask=None,
                         scalar_known=None, scalar_values=None, use_ste=False,

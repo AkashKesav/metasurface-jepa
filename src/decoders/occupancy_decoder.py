@@ -74,8 +74,12 @@ class OccupancyDecoder(nn.Module):
         self.base_dim = base_dim
 
         # Shared small scalar-conditioning MLP feeding per-block FiLM heads.
+        # INPUT CONVENTION (architecture_v5.md §3.2, audit B10): 6 numbers —
+        # [value, known-flag] for each of (l, h, r), the same convention as
+        # ScalarEncoder — so a known value and a predicted value of the same
+        # magnitude are distinguishable by the FiLM conditioning.
         self.scalar_mlp = nn.Sequential(
-            nn.Linear(3, scalar_hidden),
+            nn.Linear(6, scalar_hidden),
             nn.GELU(),
             nn.Linear(scalar_hidden, scalar_hidden),
         )
@@ -90,9 +94,12 @@ class OccupancyDecoder(nn.Module):
 
         Args:
             z:        [B, 256, hidden] predicted occupancy tokens.
-            scalars:  [B, 3] effective (l_lattice, h_atom, r_atom) — known
-                      values substituted for known scalars, predictions for
-                      unknown ones.
+            scalars:  [B, 6] effective scalar conditioning, §3.2 convention:
+                      [l_val, l_known, h_val, h_known, r_val, r_known] — the
+                      value is the true one where the scalar is known and the
+                      prediction where unknown; the flag is 1.0 (known) or 0.0
+                      (unknown), so equal magnitudes with different provenance
+                      remain distinguishable (audit B10).
 
         Returns:
             occ_logits: [B, 1, 64, 64].
@@ -100,6 +107,9 @@ class OccupancyDecoder(nn.Module):
         B, T, D = z.shape
         assert T == 256, f"expected 256 tokens, got {T}"
         assert D == self.hidden, f"expected dim {self.hidden}, got {D}"
+        assert scalars.shape == (B, 6), (
+            "decoder conditioning must be [B,6] [value, known-flag] x 3 "
+            f"(§3.2), got {tuple(scalars.shape)}")
 
         x = z.view(B, 16, 16, D).permute(0, 3, 1, 2).contiguous()
 

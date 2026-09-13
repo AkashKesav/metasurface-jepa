@@ -108,7 +108,7 @@ def main():
         hardA, softA, geomA = decode(z_y, sv_true)
         iouA, f1A = iou_f1(hardA, occ_true)
         bceA = F.binary_cross_entropy_with_logits(
-            model.occupancy_decoder(z_y, sv_true), occ_true).item()
+            model.decode_occupancy_logits(z_y, sv_true), occ_true).item()
         results3["A_true_scalars"] = {
             "iou": round(iouA, 4), "f1": round(f1A, 4),
             "pred_occ_frac": round(hardA.mean().item(), 4),
@@ -117,7 +117,7 @@ def main():
         hardB, softB, geomB = decode(z_y, scalar_pred)
         iouB, f1B = iou_f1(hardB, occ_true)
         bceB = F.binary_cross_entropy_with_logits(
-            model.occupancy_decoder(z_y, scalar_pred), occ_true).item()
+            model.decode_occupancy_logits(z_y, scalar_pred), occ_true).item()
         results3["B_pred_scalars"] = {
             "iou": round(iouB, 4), "f1": round(f1B, 4),
             "pred_occ_frac": round(hardB.mean().item(), 4),
