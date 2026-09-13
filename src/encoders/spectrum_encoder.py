@@ -101,12 +101,15 @@ class SpectrumPath(nn.Module):
         """S: (B, 2, 301) -> (c_physics (B, 384), A_goal (B, 16, 384)) — or a third
         element, the goal->spectrum attention weights (B, H, 16, 301), when
         need_weights=True."""
+        if goal_mode == "null":
+            # Goal-dropped: zero conditioning, and do NOT run the released
+            # encoder — its output is discarded on this path (audit B5; the
+            # physics term is skipped on these steps too).
+            b = S.shape[0]
+            zeros = S.new_zeros(b, self.hidden)
+            return zeros, zeros.unsqueeze(1).expand(b, self.goal_queries.shape[1], -1)
         with torch.no_grad():
             a_local = self.released(S)                       # (B, 301, 256)
-        if goal_mode == "null":
-            b = S.shape[0]
-            zeros = a_local.new_zeros(b, self.hidden)
-            return zeros, zeros.unsqueeze(1).expand(b, self.goal_queries.shape[1], -1)
         a_g = self.proj_g(a_local.mean(dim=1))               # (B, 384)
         a_goal, w = self._pool_goal(a_local, need_weights=need_weights)  # (B, 16, 384)
         a_goal = self.proj_goal(a_goal)

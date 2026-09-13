@@ -189,7 +189,19 @@ class UnifiedJEPALoss(nn.Module):
         # physics_loop.physics_loss_from_out — exactly one student forward per
         # step, one physics decode, one surrogate forward (Fix 11). Delegates
         # to the single authoritative physics implementation.
-        if self.lambda_phys > 0 and self.surrogate is not None and model.training:
+        #
+        # Audit B5: null-goal (CFG dropout) steps SKIP the physics term. Its
+        # target is the sample's true spectrum — the very condition that was
+        # dropped — so training it there would push the unconditional branch
+        # toward outputs it cannot infer (goal-ignoring / mode-collapse
+        # pressure, architecture_v5.md §8.3 check 8). The spectrum-free
+        # objectives (VICReg invariance/variance/covariance, scalar regression)
+        # still train that branch; the conditional branch keeps L_phys.
+        physics_active = (
+            self.lambda_phys > 0 and self.surrogate is not None
+            and model.training and goal_mode != "null"
+        )
+        if physics_active:
             from physics.physics_loop import physics_loss_from_out
             L_phys, _, _ = physics_loss_from_out(
                 model, out, self.surrogate, occupancy, scalar_values,

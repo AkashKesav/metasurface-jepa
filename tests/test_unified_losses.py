@@ -82,6 +82,63 @@ def _batch(seed=0, b=2):
     return occ, sv, spec, M
 
 
+class _SurrogateOut:
+    def __init__(self, prediction):
+        self.prediction = prediction
+
+
+class _FakeSurrogate(nn.Module):
+    """Deterministic tiny stand-in for the frozen EM surrogate.
+
+    Mirrors the MetaDiT surrogate contract: forward returns an object carrying
+    `.prediction` [B, 2, 301].
+    """
+
+    def __init__(self):
+        super().__init__()
+        torch.manual_seed(0)
+        self.net = nn.Sequential(nn.Linear(3 * 64 * 64, 64), nn.ReLU(),
+                                 nn.Linear(64, 2 * 301))
+
+    def forward(self, x):
+        return _SurrogateOut(
+            self.net(x.flatten(1)).reshape(-1, 2, 301))
+
+
+def test_physics_loss_skipped_on_goal_dropped_steps():
+    """Audit B5: on null-goal (CFG dropout) steps the physics term must be
+    skipped.
+
+    Its target is the sample's TRUE spectrum — the very condition that was
+    dropped — so training it there pushes the unconditional branch toward
+    outputs it cannot infer (goal-ignoring / mode-collapse pressure,
+    architecture_v5.md §8.3). Latent and scalar objectives still train that
+    branch; the conditional branch keeps the physics term on the other steps.
+    """
+    model = _build_model()
+    model.train()
+    surrogate = _FakeSurrogate()
+    for p in surrogate.parameters():
+        p.requires_grad_(False)
+    surrogate.eval()
+    objective = UnifiedJEPALoss(hidden=192, lambda_phys=1.0, surrogate=surrogate)
+    objective.train()
+    occ, sv, spec, M = _batch(seed=3)
+    sk = torch.ones(2, 3, dtype=torch.bool)
+
+    real = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+    null = objective(model, occ, sv, sk, spec, M, goal_mode="null")
+    assert real["components"]["L_phys"] > 0.0, (
+        "physics term must stay active on goal-conditioned steps")
+    assert null["components"]["L_phys"] == 0.0, (
+        "physics term must be skipped on goal-dropped (null) steps: its "
+        "target is the dropped condition; got "
+        f"{null['components']['L_phys']}")
+    assert null["components"]["L_phys_weighted"] == 0.0
+    # The spectrum-free objectives still train the null branch.
+    assert null["components"]["L_inv"] > 0.0
+
+
 # --------------------------------------------------------------------------
 # Loss components
 # --------------------------------------------------------------------------
