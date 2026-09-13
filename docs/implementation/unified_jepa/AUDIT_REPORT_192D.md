@@ -64,6 +64,7 @@ Commit `57a2cf9` (retirement), `b492f6e` (docs/workflow):
 | B16 | `need_attn=True` was accepted and silently ignored | Predictor weights returned as `out["attn_weights"]` | `5d39578` |
 | B17 | Dead config keys (`variant`, `weights.metadit`, `data.use_synthetic`, `train.epochs`) and silently-ignored valid ones (`data.num_workers`, `loss.scalar_loss_type`); invalid regimes ignored | Wire the valid keys, delete the dead ones, `_validate_config()` (unknown keys warn; bad regimes / out-of-range ratios / incoherent staging raise) | `ba5b561` |
 | B18 | Maths/safety: `hard_forward` in training without STE = zero-gradient surrogate input; degenerate target spectra amplified by a silent 1e-6 std floor; `n_film_blocks ≠ geo_depth` surfaced as an opaque IndexError; the per-step frozen guard missed the surrogate; the requested mask ratio was silently assumed equal to the achieved coverage; `OccupancyTokenLoss` unreachable; `cfg_forward` left the model in eval and had an unused arg; the evaluator silently fell back to a hardcoded surrogate path; a checkpoint-writing test could overwrite/delete live checkpoints | Guards added (STE, spectrum std, FiLM count, surrogate-gradient); achieved mask fraction logged per bucket and per validation stratum; dead code removed; `cfg_forward` restores the caller's mode; the evaluator's surrogate path fails loudly; the test refuses to run when live checkpoints exist | `3b6e406` |
+| B21 | The B18 `hard_forward` guard tested the model's **mode** (`assert not self.training`) rather than **gradient tracking**, contradicting its own message ("run this path under eval/no_grad for diagnostics"). It therefore refused `preflight()`'s hard-assembly diagnostics, which legitimately run in train mode — the mandatory real-data gate exited 1 before any training could start. B18 added the guard without updating its one existing legitimate caller; nothing caught it locally because the preflight needs the real splits and released weights, which the dev machine does not stage | Guard predicate is now `not self.training or not torch.is_grad_enabled()` (a gradient-enabled training forward is still refused); the preflight runs its diagnostic block under `torch.no_grad()`. Found by the first cloud run (Kaggle, 2026-09-13) | `4deab8a` |
 
 ---
 
@@ -161,7 +162,7 @@ against the released MetaDiT convention (`external/metadit/datapipe.py`, `model/
 - **Local environment:** Python 3.14 / torch 2.14 CPU; the released weights and dataset splits are
   **not staged** locally, so data-dependent tests skip loudly by design.
 - **Test suite at the time of writing:** `python -m pytest tests/ -q --tb=line` →
-  **274 passed, 22 skipped, 0 failed** (skips: CUDA-only paths and not-staged data/weights).
+  **275 passed, 22 skipped, 0 failed** (skips: CUDA-only paths and not-staged data/weights).
 - **Static audit:** `python scripts/preflight/repo_static_audit.py` → 0 findings.
 - **Smokes run:** `train_unified.py --no-train --use-synthetic-smoke` (forward+backward),
   `--max-steps 3` synthetic training run with checkpoint write, evaluator unit paths.
