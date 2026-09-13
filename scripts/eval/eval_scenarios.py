@@ -322,6 +322,41 @@ def diversity_check(model, surrogate, occ, sv, spec, mask, scalar_known,
 
 
 @torch.no_grad()
+def cfg_guidance_sweep(model, surrogate, occ, sv, spec, mask, scalar_known,
+                       device, weights=(0.0, 0.5, 1.0, 2.0, 3.0, 5.0)):
+    """Classifier-free guidance at inference, swept over the guidance weight
+    (architecture_v5.md §3.5.1).
+
+    Audit B24: training prepares the unconditional branch (goal dropout +
+    null-goal steps) but **nothing in the pipeline ever called `cfg_forward`**,
+    so `w` was never exercised and the CFG machinery was dead code. This wires
+    it into the authoritative evaluator.
+
+    Run on the hard stratum, where the design's gates apply. The endpoints are
+    meaningful: `w = 0` is the pure-null (unconditional) prediction and `w = 1`
+    is exactly the plain real-goal forward, so the sweep brackets conditioned
+    and unconditioned. A curve that is flat in `w` means the goal conditioning
+    has no effect on the deployed design — the same Failure Mode 2 the
+    real-vs-shuffled gate tests, measured through the guided path instead.
+
+    Returns:
+        dict mapping str(w) -> normalized spectrum error of the guided design.
+    """
+    from predictor.guidance import cfg_forward
+
+    out = {}
+    for w in weights:
+        z_guided, scalar_guided, _ = cfg_forward(
+            model, occ, sv, scalar_known, spec, mask, w)
+        geometry, _ = model.decode_geometry(
+            z_guided, scalar_guided, occ_input=occ, mask=mask,
+            scalar_known=scalar_known, scalar_values=sv, hard_forward=True)
+        spectrum_pred = surrogate(geometry).prediction
+        out[str(float(w))] = float(_spectrum_error(spectrum_pred, spec))
+    return out
+
+
+@torch.no_grad()
 def nearest_neighbor_baseline(val_spec, train_specs, train_occupancy,
                               train_scalars, surrogate):
     """Real training-split nearest-neighbor baseline (Fix 15).
@@ -499,6 +534,12 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
     # Diversity
     results["diversity_A"] = diversity_check(
         model, surrogate, occ, sv, spec, M_a, sk_a, device, n_samples=5)
+
+    # Classifier-free guidance sweep on the hard stratum (audit B24: cfg_forward
+    # previously had no caller anywhere in the pipeline, so the guidance weight
+    # was never exercised).
+    results["cfg_guidance_sweep_A"] = cfg_guidance_sweep(
+        model, surrogate, occ, sv, spec, M_a, sk_a, device)
 
     # NN baseline on the REAL training split (Fix 15).
     train_specs, train_occ, train_sv = _load_train_representations(

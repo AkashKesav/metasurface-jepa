@@ -339,6 +339,56 @@ def test_validate_uses_unified_signature():
     assert out["easy"]["scalars"] == "all_known"
 
 
+class _StubSurrogatePrediction:
+    def __init__(self, prediction):
+        self.prediction = prediction
+
+
+class _StubSurrogate(nn.Module):
+    """Minimal stand-in with the frozen surrogate's `.prediction` return contract
+    — enough to check that different guidance weights produce different designs."""
+
+    def forward(self, geometry):  # geometry (B, 3, 64, 64)
+        g = geometry.mean(dim=(1, 2, 3))                      # (B,)
+        spec = g.view(-1, 1, 1).expand(-1, 2, 301)
+        return _StubSurrogatePrediction(spec)
+
+
+def test_cfg_guidance_sweep_exercises_cfg_forward():
+    """Audit B24: `cfg_forward` was correct but had NO caller anywhere in the
+    pipeline — training prepares the unconditional branch (goal dropout), and
+    then nothing ever consumed the guided output, so the guidance weight `w` was
+    never exercised. The authoritative evaluator now sweeps it.
+
+    Asserts the sweep runs over every requested weight, that `w` genuinely
+    changes the resulting design (otherwise the sweep is inert), and that the
+    model's training mode is restored (audit B18 fixed cfg_forward to do this).
+    """
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts", "eval"))
+    from eval_scenarios import cfg_guidance_sweep
+
+    model = _build_model()
+    model.train()
+    surrogate = _StubSurrogate()
+    torch.manual_seed(3)
+    b = 2
+    occ = (torch.rand(b, 1, 64, 64) > 0.5).float()
+    sv = torch.rand(b, 3) * 2 + 1
+    spec = torch.rand(b, 2, 301)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=7).sample(occ, 1.0)
+    sk = torch.zeros(b, 3, dtype=torch.bool)
+
+    weights = (0.0, 1.0, 3.0)
+    out = cfg_guidance_sweep(model, surrogate, occ, sv, spec, M, sk, "cpu",
+                             weights=weights)
+    assert set(out.keys()) == {str(float(w)) for w in weights}
+    assert all(isinstance(v, float) for v in out.values())
+    assert len(set(round(v, 12) for v in out.values())) > 1, (
+        "the guidance weight has no effect on the design — the sweep is inert")
+    assert model.training is True, "cfg_forward must restore the caller's mode"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
