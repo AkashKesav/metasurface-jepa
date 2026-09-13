@@ -17,6 +17,9 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+# The trainer is a script, not a package: the physics-alive check lives there
+# (audit B24) and must be unit testable without the real data/weights.
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts", "train"))
 
 import torch
 import torch.nn as nn
@@ -926,6 +929,75 @@ def test_decode_geometry_invariants_known_scalars():
                           atol=1e-5), "known r must be used exactly"
     # None of the wrong predictions (99) may appear.
     assert (geometry[0] < 90.0).all(), "wrong scalar_pred leaked into geometry"
+
+
+class _StubPrediction:
+    def __init__(self, prediction):
+        self.prediction = prediction
+
+
+class _StubPhysicsSurrogate(nn.Module):
+    """Live physics path: output depends on the geometry, so dS/dG is non-zero."""
+
+    def forward(self, geometry):  # (B,3,64,64)
+        g = geometry.mean(dim=(2, 3))                       # (B,3)
+        spec = torch.stack([g[:, 0], g[:, 1]], dim=1)       # (B,2)
+        return _StubPrediction(spec.unsqueeze(-1).expand(-1, -1, 301))
+
+
+class _DeadJacobianSurrogate(nn.Module):
+    """Differentiable but with a ZERO Jacobian — the exact failure mode of the
+    soft-occupancy path against the released surrogate."""
+
+    def forward(self, geometry):
+        b = geometry.shape[0]
+        z = geometry.sum() * 0.0
+        return _StubPrediction(z.view(1, 1, 1).expand(b, 2, 301))
+
+
+def _physics_check_fixtures():
+    model = _build_model()
+    model.train()
+    torch.manual_seed(11)
+    occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
+    sv = torch.rand(2, 3) * 2 + 1
+    spec = torch.rand(2, 2, 301)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=5).sample(occ, 1.0)
+    sk = torch.zeros(2, 3, dtype=torch.bool)
+    with torch.no_grad():
+        out = model(occ, sv, sk, spec, M, with_target=False)
+    return model, out, occ, sv, sk, spec, M
+
+
+def test_assert_physics_reaches_student_accepts_a_live_path():
+    """Audit B24: the check must PASS when the physics term actually carries
+    gradient (the STE path: 360 student params on the released surrogate).
+
+    Local coverage for this check matters: `preflight()` cannot run on the dev
+    machine (it needs the real splits and released weights), so while this lived
+    inline in `preflight` a `NameError` in it reached the cloud run untouched.
+    """
+    from train_unified import assert_physics_reaches_student
+
+    model, out, occ, sv, sk, spec, M = _physics_check_fixtures()
+    cfg = {"staging": {"physics_use_ste": True}}
+    n = assert_physics_reaches_student(
+        model, out, _StubPhysicsSurrogate(), occ, sv, sk, spec, M, cfg)
+    assert n > 0, "a live physics path must reach the student"
+
+
+def test_assert_physics_reaches_student_refuses_a_dead_path():
+    """Audit B24: a healthy-looking L_phys with a zero Jacobian must raise —
+    this is the silent no-op the soft-occupancy path exhibits (measured: L_phys
+    = 18.58, ZERO student params with gradient)."""
+    from train_unified import assert_physics_reaches_student
+
+    model, out, occ, sv, sk, spec, M = _physics_check_fixtures()
+    cfg = {"staging": {"physics_use_ste": True}}
+    with pytest.raises(RuntimeError, match="NO student gradient"):
+        assert_physics_reaches_student(
+            model, out, _DeadJacobianSurrogate(), occ, sv, sk, spec, M, cfg)
 
 
 if __name__ == "__main__":

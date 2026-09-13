@@ -1045,6 +1045,49 @@ def evaluate_forward(model, occ, sv, spec, mask, cfg, device):
 # real-data preflight (Fix 17)
 # ---------------------------------------------------------------------------
 
+def assert_physics_reaches_student(model, out, surrogate, occ, sv, sk, spec,
+                                   mask, cfg):
+    """Assert that the physics term ALONE carries gradient to the student.
+
+    Audit B24. The preflight's ownership counts come from the FULL objective, so
+    `L_inv/L_var/L_cov/L_occ` satisfy them too — a physics path with a dead
+    Jacobian passes them unnoticed. Measured against the released surrogate
+    (2026-09-13 probe): the soft-occupancy path computes a perfectly healthy
+    L_phys (18.58) while ZERO student parameters receive gradient, because the
+    soft field is ~96% out of distribution for the surrogate
+    (`spectrum_rel_diff = 0.9599`). The STE path gives 360 student params.
+
+    Module-level (not inlined in `preflight`) so the check itself is unit
+    testable: the preflight needs the real splits and released weights, which
+    the dev machine does not stage, so an inlined version gets no local coverage
+    at all — which is how a `NameError` in it reached the cloud run.
+
+    Returns the number of student parameters that received gradient.
+    """
+    from physics.physics_loop import physics_loss_from_out
+
+    physics_use_ste = bool(cfg.get("staging", {}).get("physics_use_ste", True))
+    model.zero_grad(set_to_none=True)
+    L_phys_only, _, _ = physics_loss_from_out(
+        model, out, surrogate, occ, sv, sk, spec, mask,
+        loss_type="smooth_l1", use_ste=physics_use_ste, normalize=True)
+    L_phys_only.backward()
+    n_with_grad = sum(
+        1 for p in model.parameters()
+        if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
+    model.zero_grad(set_to_none=True)
+    if n_with_grad == 0:
+        raise RuntimeError(
+            "physics term produced NO student gradient "
+            f"(L_phys={float(L_phys_only.detach()):.4f}, "
+            f"physics_use_ste={physics_use_ste}): the loss is healthy-looking "
+            "while the frozen surrogate contributes nothing to training "
+            "(audit B24). With physics_use_ste=false the soft occupancy field "
+            "is ~96% out of distribution for the surrogate and every gradient "
+            "is zero.")
+    return n_with_grad
+
+
 def preflight(cfg, device=None):
     """End-to-end real-data preflight: one real sample through the full path.
 
@@ -1268,32 +1311,10 @@ def preflight(cfg, device=None):
 
     # Physics-alive check (audit B24). The ownership counts above come from the
     # FULL objective, so L_inv/L_var/L_cov/L_occ also satisfy them — a physics
-    # path with a dead Jacobian would pass unnoticed. Measured on the released
-    # surrogate: the soft-occupancy path computes a healthy-looking L_phys
-    # (18.58) while ZERO student parameters receive gradient. So assert the
-    # physics term ALONE reaches the student. The ownership counts are already
-    # in locals, so resetting grads here cannot corrupt them.
-    from physics.physics_loop import physics_loss_from_out
-
-    physics_use_ste = bool(cfg.get("staging", {}).get("physics_use_ste", True))
-    model.zero_grad(set_to_none=True)
-    L_phys_only, _, _ = physics_loss_from_out(
-        model, out, surrogate, occ, sv, sk, spec, M,
-        loss_type="smooth_l1", use_ste=physics_use_ste, normalize=True)
-    physics_grads = sum(
-        1 for p in model.parameters()
-        if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
-    model.zero_grad(set_to_none=True)
-    if physics_grads == 0:
-        raise RuntimeError(
-            "preflight: the physics term produced NO student gradient "
-            f"(L_phys={float(L_phys_only.detach()):.4f}, "
-            f"physics_use_ste={physics_use_ste}). This is the silent-no-op "
-            "failure mode (audit B22/B24): the loss looks healthy while the "
-            "frozen surrogate contributes nothing to training. With "
-            "physics_use_ste=False the soft occupancy field is ~96% out of "
-            "distribution for the surrogate and every gradient is zero.")
-    checks["physics_term_student_params_with_grad"] = physics_grads
+    # path with a dead Jacobian would pass unnoticed. The ownership counts are
+    # already in locals, so resetting grads inside the check cannot corrupt them.
+    checks["physics_term_student_params_with_grad"] = assert_physics_reaches_student(
+        model, out, surrogate, occ, sv, sk, S, M, cfg)
 
     return {"checks": checks, "gradient_ownership": ownership,
             "loss": float(loss.detach())}
