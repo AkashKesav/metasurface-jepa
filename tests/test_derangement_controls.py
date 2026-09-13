@@ -38,6 +38,53 @@ def test_derangement_batch_size_1_raises():
         derangement_permutation(1, "cpu")
 
 
+def test_derangement_permutation_returns_on_the_target_device():
+    """Audit B22: the permutation must land on the requested device even when the
+    draw happens on the generator's device."""
+    gen = torch.Generator()  # CPU generator
+    perm = derangement_permutation(6, "cpu", generator=gen)
+    assert perm.device.type == "cpu"
+    assert perm.shape == (6,)
+    assert not torch.any(perm == torch.arange(6))
+
+
+def test_derangement_permutation_reproducible_with_explicit_generator():
+    """An explicitly supplied generator keeps the B12 seeded shuffled control
+    reproducible after the B22 draw-device change."""
+    g1 = torch.Generator()
+    g1.manual_seed(11)
+    g2 = torch.Generator()
+    g2.manual_seed(11)
+    assert torch.equal(
+        derangement_permutation(8, "cpu", generator=g1),
+        derangement_permutation(8, "cpu", generator=g2),
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the pre-fix failure is CUDA-only: torch.randperm requires the "
+           "generator's device to match the draw device, so reproducing it needs "
+           "a CPU generator with a CUDA target (no GPU on this machine). "
+           "Coverage limitation, not a passing test.",
+)
+def test_derangement_permutation_accepts_cpu_generator_with_cuda_target():
+    """Audit B22: the evaluator's seeded shuffled control passes a CPU generator
+    together with a CUDA target device. Forwarding the TARGET device to
+    torch.randperm raised
+      RuntimeError: Expected a 'cuda' device type for generator but found 'cpu'
+    which aborted the whole acceptance-gate evaluation on the GPU run.
+
+    NOTE: skipped loudly on a CPU-only machine; exercised on any CUDA
+    environment (the Kaggle kernel is where the failure was found).
+    """
+    gen = torch.Generator()
+    gen.manual_seed(0)
+    perm = derangement_permutation(6, "cuda", generator=gen)
+    assert perm.device.type == "cuda"
+    assert not torch.any(perm == torch.arange(6, device="cuda"))
+
+
 def test_make_shuffled_spectrum():
     """Shuffled spectrum uses derangement."""
     S = torch.randn(10, 2, 301)

@@ -37,15 +37,28 @@ def derangement_permutation(batch_size: int, device: torch.device | str,
         if seed is not None:
             generator.manual_seed(seed)
 
+    # torch.randperm requires the generator's device to match the draw device,
+    # and a caller may legitimately hand over a CPU generator together with a
+    # CUDA target — the evaluator's seeded shuffled control does exactly that
+    # (audit B12). Forwarding the TARGET device raised
+    #   RuntimeError: Expected a 'cuda' device type for generator but found 'cpu'
+    # and killed the whole acceptance-gate evaluation on the GPU run (audit B22).
+    # Draw on the generator's own device and move the permutation to the target:
+    # the generator's stream is untouched by the move, so a fixed seed stays
+    # reproducible.
+    draw_device = generator.device
+    positions = torch.arange(batch_size, device=device)
+
     # Simple rejection sampling for derangement
     # For small batch sizes this is efficient; for large sizes use more sophisticated algorithms
     max_attempts = 100
     for _ in range(max_attempts):
-        perm = torch.randperm(batch_size, generator=generator, device=device)
-        if not torch.any(perm == torch.arange(batch_size, device=device)):
+        perm = torch.randperm(batch_size, generator=generator,
+                              device=draw_device).to(device)
+        if not torch.any(perm == positions):
             return perm
     # Fallback: cyclic shift (guaranteed derangement for n >= 2)
-    return torch.roll(torch.arange(batch_size, device=device), shifts=1)
+    return torch.roll(positions, shifts=1)
 
 
 def derange_batch_tensor(X: torch.Tensor, generator: torch.Generator | None = None,
