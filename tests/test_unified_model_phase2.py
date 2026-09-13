@@ -438,6 +438,36 @@ def test_old_checkpoint_not_compatible():
         load_into_model(unified, old_sd, torch.device("cpu"), strict=True)
 
 
+def test_set_spectrum_path_freezes_released_encoder(tmp_path):
+    """Audit B1: attaching the released encoder must freeze it.
+
+    SpectrumPath is constructed with released=None on the production path and
+    the released encoder is attached afterwards via set_spectrum_path — so
+    SpectrumPath's own freeze branch never ran, leaving the released encoder's
+    parameters trainable (they entered the optimizer's parameter set).
+    """
+    from assembly import set_spectrum_path
+    import encoders.spectrum_encoder  # noqa: F401  (puts external/metadit on sys.path)
+    from model.spec_encoder import VanillaSpectrumEncoder
+
+    enc = VanillaSpectrumEncoder()
+    sd = {f"context_encoder.{k}": v for k, v in enc.state_dict().items()}
+    path = tmp_path / "spec_encoder.pth"
+    torch.save(sd, str(path))
+
+    model = build_model()
+    set_spectrum_path(model, str(path), torch.device("cpu"))
+    released = model.spectrum_path.released
+    assert released is not None, "set_spectrum_path must attach the released encoder"
+    assert all(not p.requires_grad for p in released.parameters()), (
+        "released spectrum encoder parameters must be frozen (requires_grad=False)")
+    assert not released.training, "released encoder must be in eval() mode"
+    trainable = {id(p) for p in model.parameters() if p.requires_grad}
+    assert not (trainable & {id(p) for p in released.parameters()}), (
+        "released encoder parameters must be excluded from the optimizer's "
+        "trainable set")
+
+
 # --------------------------------------------------------------------------
 # Loss computability + finiteness
 # --------------------------------------------------------------------------

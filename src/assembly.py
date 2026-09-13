@@ -42,7 +42,18 @@ PIXEL_GRID = 16  # 64 / patch_size 4
 
 
 def set_spectrum_path(model, spec_weights, device):
+    """Attach the released (frozen) spectrum encoder to the model's SpectrumPath.
+
+    The freeze must happen here: SpectrumPath is constructed with released=None
+    on the production path (both builders), so SpectrumPath's own freeze branch
+    never runs — without this, the released encoder's parameters stay trainable
+    and enter the optimizer's parameter set (audit finding B1; architecture_v5.md
+    §6: released spectrum encoder is a frozen reference, never trained).
+    """
     released = ReleasedSpectrumEncoder(spec_weights, device=device)
+    for p in released.parameters():
+        p.requires_grad_(False)
+    released.eval()
     model.spectrum_path.released = released
     model.spectrum_path.released.to(device)
 
