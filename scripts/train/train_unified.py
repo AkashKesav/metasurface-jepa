@@ -529,6 +529,10 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         spec_path, device, allow_dummy=use_synthetic_smoke)
     model = build_unified_model(cfg, spec_weights, device=device)
     cfg.setdefault("_architecture_id", model.architecture_id)
+    # Audit B2: schedule the EMA momentum ramp from the run's total steps.
+    # EMAEncoder defaults to total_steps=1, which saturates current_momentum()
+    # at its final value (0.999) from step 1 instead of ramping 0.996 -> 0.999.
+    model.set_total_steps(total_steps)
 
     # --- objective ---
     loss_cfg = cfg.get("loss", {})
@@ -694,7 +698,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
               f"L_scalar={components['L_scalar']:.4f}")
         assert torch.isfinite(loss), "smoke loss must be finite"
         return {"final_step": 0, "final_loss": float(loss.detach()),
-                "components": components, "regime_report": regime_logger.report()}
+                "components": components, "regime_report": regime_logger.report(),
+                "total_steps": total_steps,
+                "ema_total_steps": int(model.ema.total_steps)}
 
     # --- training loop ---
     model.train()
@@ -822,6 +828,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         "final_step": total_steps - 1,
         "final_loss": last_loss if last_loss else 0.0,
         "regime_report": regime_logger.report(),
+        "total_steps": total_steps,
+        "ema_total_steps": int(model.ema.total_steps),
     }
     return report
 

@@ -45,6 +45,58 @@ def test_real_mode_missing_data_raises():
         train(cfg, no_train=True, device="cpu", use_synthetic_smoke=False)
 
 
+def test_trainer_initializes_ema_schedule(tmp_path, monkeypatch):
+    """Audit B2: the EMA momentum ramp must be scheduled from the run's total
+    steps.
+
+    EMAEncoder defaults to total_steps=1, which saturates current_momentum() at
+    its final value (0.999) from step 1 instead of ramping 0.996 -> 0.999 across
+    the run — the trainer never called set_total_steps.
+    """
+    import train_unified
+    from train_unified import train
+
+    monkeypatch.setattr(train_unified, "REPO_ROOT", str(tmp_path))
+    cfg = _load_cfg()
+    report = train(cfg, no_train=True, device="cpu",
+                   use_synthetic_smoke=True, max_steps=7)
+    assert report.get("ema_total_steps") == 7, (
+        "trainer must set the EMA schedule length from the run's total steps; "
+        f"got {report.get('ema_total_steps')!r}")
+
+
+def test_resume_restores_ema_state_and_reports_schedule_change(tmp_path, monkeypatch, capsys):
+    """Audit B3: resuming must restore the saved EMA state and must report a
+    schedule-length change loudly — never silently re-derive a different ramp.
+
+    Run A: 3 steps (checkpoint step 2). Run B resumes from it with a longer
+    schedule (5 steps): the resumed run must announce the change and adopt the
+    current run's schedule so the EMA ramp stays consistent with the LR cosine
+    schedule rebuilt from config.
+    """
+    import train_unified
+    from train_unified import train
+
+    monkeypatch.setattr(train_unified, "REPO_ROOT", str(tmp_path))
+    cfg = _load_cfg()
+    r1 = train(cfg, use_synthetic_smoke=True, max_steps=3, device="cpu")
+    assert r1["ema_total_steps"] == 3
+    ckpt = os.path.join(str(tmp_path), "checkpoints", "unified", "final.pt")
+    assert os.path.exists(ckpt), "run A must write a final checkpoint"
+    capsys.readouterr()  # drop run A output
+
+    r2 = train(cfg, resume_path=ckpt, use_synthetic_smoke=True, max_steps=5,
+               device="cpu")
+    out = capsys.readouterr().out
+    assert "Resumed at step 3" in out, out
+    assert "EMA schedule length changed" in out, (
+        "resuming with a different schedule length must be reported loudly, "
+        f"not silently rescheduled; captured:\n{out}")
+    assert r2["ema_total_steps"] == 5, (
+        "the resumed run must adopt THIS run's schedule length (matching the "
+        "LR cosine schedule rebuilt from config)")
+
+
 def test_scalar_masker_rng_evolves_across_batches():
     """Fix 3: scalar masking must use PERSISTENT RNG state — two mixed batches
     drawn from the SAME persistent bank must differ (RNG evolves), and the
