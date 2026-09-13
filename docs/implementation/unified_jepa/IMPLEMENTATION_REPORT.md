@@ -1,6 +1,15 @@
 # Unified Occupancy–Parameter–Spectrum JEPA — Implementation Report
 
 **Date:** 2026-08-27
+
+> **Superseded in part by the 2026-09-13 audit** (`AUDIT_REPORT_192D.md`): the legacy 384-D path
+> described here as "preserved" has been retired and deleted (operator decision), and two claims
+> in this report were found to be overstated by the audit — the resume-equivalence assertion
+> (the EMA schedule was never initialised and the curriculum RNG was not checkpointed; fixed in
+> B2–B4) and the `preservation_loss` entry below (retention is structural inside
+> `decode_geometry`, not a separate loss function). Treat `AUDIT_REPORT_192D.md` as the current
+> record of the code state.
+
 **Scope:** Phase 1 → Phase 5 of the Unified JEPA restructure
 **Authority:** `docs/implementation/unified_jepa/architecture_v5.md` (architectural spec) + `00_MASTER_EXECUTION.md` (execution controller) + `01`–`05` phase MDs
 **Test status:** `473 passed, 12 skipped` (skips are CUDA-only tests on a CPU machine)
@@ -146,8 +155,8 @@ EMA restored) — resume-equivalence test passed.
 
 | File | Purpose |
 |---|---|
-| `src/physics/physics_loop.py` | `load_surrogate` (frozen ConvSurrogate, eval, params frozen, autograd flows through input). `physics_loss` — the single authoritative physics path: `z_hat → decode_geometry → assembled geometry → surrogate → Ŝ → normalized L1/SmoothL1/MSE`; `normalize` divides prediction AND target by per-sample spectrum std (wide dynamic range). `surrogate_gradient_test` — tries soft occupancy FIRST, falls back to documented STE only if soft yields zero student gradients (Phase 4 MD §3 "do not silently choose STE"). `soft_hard_occupancy_test` — quantifies soft-vs-binary surrogate OOD-ness, recommends STE. `preservation_loss` — L_preserve for known occupancy/scalars (Phase 4 MD §6). |
-| `src/assembly.py` addition | `UnifiedJEPA.geometry_decoder` (GeometryDecoder, 192-D hidden, occupancy head) + `decode_geometry(z_hat, scalar_pred, occ_input, mask, use_ste)` — soft occupancy (sigmoid), optional STE hard-forward/soft-backward, visible-pixel retention from input occupancy, assembles `[B,3,64,64]` via `assemble_metadit_geometry`. |
+| `src/physics/physics_loop.py` | `load_surrogate` (frozen ConvSurrogate, eval, params frozen, autograd flows through input). `physics_loss` — the single authoritative physics path: `z_hat → decode_geometry → assembled geometry → surrogate → Ŝ → normalized L1/SmoothL1/MSE`; `normalize` divides prediction AND target by per-sample spectrum std (wide dynamic range). `surrogate_gradient_test` — tries soft occupancy FIRST, falls back to documented STE only if soft yields zero student gradients (Phase 4 MD §3 "do not silently choose STE"). `soft_hard_occupancy_test` — quantifies soft-vs-binary surrogate OOD-ness, recommends STE. **Correction (2026-09-13 audit):** there is no `preservation_loss` — L_preserve is structural: `decode_geometry` retains visible occupancy pixels and substitutes known scalars, so the physics loss cannot overwrite observed geometry. |
+| `src/assembly.py` addition | `UnifiedJEPA.occupancy_decoder` (OccupancyDecoder, 192-D hidden, occupancy logits — renamed from `geometry_decoder` in the 2026-09-13 retirement) + `decode_geometry(z_hat, scalar_pred, occ_input, mask, use_ste)` — soft occupancy (sigmoid), optional STE hard-forward/soft-backward, visible-pixel retention from input occupancy, assembles `[B,3,64,64]` via `assemble_metadit_geometry`. `decode_occupancy_prob`/`decode_occupancy_logits` expose the raw-sigmoid diagnostic path (audit B7/B10). |
 | `src/predictor/guidance.py` | `cfg_combine(z_real, z_null, w)`, `goal_dropout(goal_mode, p, rng)`, `cfg_forward(...)` — two-pass CFG inference. |
 | `src/diagnostics/guidance_gap.py` | `compute_guidance_gap` (‖z_real − z_null‖ / σ(z_real), §20.3) and `guidance_gap_sweep` across mask ratios. |
 | `scripts/diagnostics/run_guidance_gap_sweep.py` | CLI producing the §20.3 gap curve. |
