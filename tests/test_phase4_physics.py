@@ -957,7 +957,6 @@ class _DeadJacobianSurrogate(nn.Module):
 
 def _physics_check_fixtures():
     model = _build_model()
-    model.train()
     torch.manual_seed(11)
     occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
     sv = torch.rand(2, 3) * 2 + 1
@@ -965,25 +964,30 @@ def _physics_check_fixtures():
     M = BlockMasker(placement="random", grid=16, min_side=3,
                     k_range=(1, 4), seed=5).sample(occ, 1.0)
     sk = torch.zeros(2, 3, dtype=torch.bool)
-    with torch.no_grad():
-        out = model(occ, sv, sk, spec, M, with_target=False)
-    return model, out, occ, sv, sk, spec, M
+    return model, occ, sv, sk, spec, M
 
 
 def test_assert_physics_reaches_student_accepts_a_live_path():
     """Audit B24: the check must PASS when the physics term actually carries
     gradient (the STE path: 360 student params on the released surrogate).
 
-    Local coverage for this check matters: `preflight()` cannot run on the dev
-    machine (it needs the real splits and released weights), so while this lived
-    inline in `preflight` a `NameError` in it reached the cloud run untouched.
+    The fixture deliberately reproduces the PREFLIGHT's graph state — a forward
+    whose graph has already been consumed by a backward, and the model left in
+    train mode. An earlier version of this check reused the caller's output and
+    died on the cloud run with "Trying to backward through the graph a second
+    time"; the first version of this test used a no_grad forward and so could not
+    catch it.
     """
     from train_unified import assert_physics_reaches_student
 
-    model, out, occ, sv, sk, spec, M = _physics_check_fixtures()
+    model, occ, sv, sk, spec, M = _physics_check_fixtures()
+    model.train()
+    model(occ, sv, sk, spec, M, with_target=False)["z_hat"].sum().backward()
+    model.zero_grad(set_to_none=True)
+
     cfg = {"staging": {"physics_use_ste": True}}
     n = assert_physics_reaches_student(
-        model, out, _StubPhysicsSurrogate(), occ, sv, sk, spec, M, cfg)
+        model, _StubPhysicsSurrogate(), occ, sv, sk, spec, M, cfg)
     assert n > 0, "a live physics path must reach the student"
 
 
@@ -993,11 +997,11 @@ def test_assert_physics_reaches_student_refuses_a_dead_path():
     = 18.58, ZERO student params with gradient)."""
     from train_unified import assert_physics_reaches_student
 
-    model, out, occ, sv, sk, spec, M = _physics_check_fixtures()
+    model, occ, sv, sk, spec, M = _physics_check_fixtures()
     cfg = {"staging": {"physics_use_ste": True}}
     with pytest.raises(RuntimeError, match="NO student gradient"):
         assert_physics_reaches_student(
-            model, out, _DeadJacobianSurrogate(), occ, sv, sk, spec, M, cfg)
+            model, _DeadJacobianSurrogate(), occ, sv, sk, spec, M, cfg)
 
 
 if __name__ == "__main__":

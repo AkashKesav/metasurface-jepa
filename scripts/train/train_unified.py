@@ -1045,8 +1045,7 @@ def evaluate_forward(model, occ, sv, spec, mask, cfg, device):
 # real-data preflight (Fix 17)
 # ---------------------------------------------------------------------------
 
-def assert_physics_reaches_student(model, out, surrogate, occ, sv, sk, spec,
-                                   mask, cfg):
+def assert_physics_reaches_student(model, surrogate, occ, sv, sk, spec, mask, cfg):
     """Assert that the physics term ALONE carries gradient to the student.
 
     Audit B24. The preflight's ownership counts come from the FULL objective, so
@@ -1057,25 +1056,37 @@ def assert_physics_reaches_student(model, out, surrogate, occ, sv, sk, spec,
     soft field is ~96% out of distribution for the surrogate
     (`spectrum_rel_diff = 0.9599`). The STE path gives 360 student params.
 
-    Module-level (not inlined in `preflight`) so the check itself is unit
-    testable: the preflight needs the real splits and released weights, which
-    the dev machine does not stage, so an inlined version gets no local coverage
-    at all — which is how a `NameError` in it reached the cloud run.
+    Runs its OWN grad-enabled forward. It must not reuse the caller's `out`: the
+    preflight's main `loss.backward()` has already consumed that graph, so
+    building on it raises "Trying to backward through the graph a second time"
+    (observed on the cloud run) — a fresh forward keeps the check independent of
+    the caller's graph state.
+
+    Module-level (not inlined in `preflight`) so the check is unit testable: the
+    preflight needs the real splits and released weights, which the dev machine
+    does not stage, so an inlined version gets no local coverage — which is how a
+    `NameError` and a missing `.backward()` reached the cloud run.
 
     Returns the number of student parameters that received gradient.
     """
     from physics.physics_loop import physics_loss_from_out
 
     physics_use_ste = bool(cfg.get("staging", {}).get("physics_use_ste", True))
+    was_training = model.training
+    model.train()  # the STE branch is training-only
     model.zero_grad(set_to_none=True)
-    L_phys_only, _, _ = physics_loss_from_out(
-        model, out, surrogate, occ, sv, sk, spec, mask,
-        loss_type="smooth_l1", use_ste=physics_use_ste, normalize=True)
-    L_phys_only.backward()
-    n_with_grad = sum(
-        1 for p in model.parameters()
-        if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
-    model.zero_grad(set_to_none=True)
+    try:
+        out = model(occ, sv, sk, spec, mask, goal_mode="real", with_target=False)
+        L_phys_only, _, _ = physics_loss_from_out(
+            model, out, surrogate, occ, sv, sk, spec, mask,
+            loss_type="smooth_l1", use_ste=physics_use_ste, normalize=True)
+        L_phys_only.backward()
+        n_with_grad = sum(
+            1 for p in model.parameters()
+            if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
+    finally:
+        model.zero_grad(set_to_none=True)
+        model.train(was_training)
     if n_with_grad == 0:
         raise RuntimeError(
             "physics term produced NO student gradient "
@@ -1314,7 +1325,7 @@ def preflight(cfg, device=None):
     # path with a dead Jacobian would pass unnoticed. The ownership counts are
     # already in locals, so resetting grads inside the check cannot corrupt them.
     checks["physics_term_student_params_with_grad"] = assert_physics_reaches_student(
-        model, out, surrogate, occ, sv, sk, S, M, cfg)
+        model, surrogate, occ, sv, sk, S, M, cfg)
 
     return {"checks": checks, "gradient_ownership": ownership,
             "loss": float(loss.detach())}
