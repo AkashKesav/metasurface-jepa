@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Repository Static Audit (Phase 2 §9).
+"""Repository Static Audit.
 
 Scans first-party code for:
 - Device duplication: .cuda(), .to("cuda"), torch.device("cuda")
 - RNG duplication: manual_seed, manual_seed_all, randperm, torch.Generator
 - Duplicate training loops: torch.optim.AdamW, optimizer.step(), objective.on_optimizer_step() outside canonical path
 - Duplicate checkpoint writes: torch.save() classification
-- Stale references: model.proj, latest.pt, adaptive, LOSS_LADDER, guidance.py, routing.py, geometry_decoder.py
+- Stale references: model.proj, latest.pt, adaptive, LOSS_LADDER, geometry_decoder.py
 
-Removes obsolete active references.
+Canonical locations after the 2026-09-13 legacy retirement:
+- device: src/runtime/device.py; RNG: src/runtime/reproducibility.py (plus the
+  Generator-owning modules listed in ALLOWED_CONTEXT); training loop and
+  checkpointing: src/train/engine.py + scripts/train/train_unified.py.
 """
 
 import re
@@ -67,14 +70,6 @@ PATTERNS = {
         r"LOSS_LADDER",
         r"loss_ladder",
     ],
-    "stale_guidance": [
-        r"guidance\.py",
-        r"guidance\b",
-    ],
-    "stale_routing": [
-        r"routing\.py",
-        r"routing\b",
-    ],
     "stale_geometry_decoder": [
         r"geometry_decoder\.py",
         r"geometry_decoder\b",
@@ -86,9 +81,7 @@ EXCLUDE_FILES = {
     "runtime/device.py",  # This is the canonical device module
     "runtime/reproducibility.py",  # This is the canonical RNG module
     "train/engine.py",  # This is the canonical training engine
-    "train_milestone_b.py",  # This is the canonical training script
-    "checkpoint_integrity_check.py",  # Preflight script
-    "milestone_b_preflight.py",  # Preflight script
+    "train_unified.py",  # This is the canonical training script
     "repo_static_audit.py",  # This script
 }
 
@@ -97,38 +90,38 @@ EXCLUDE_FILES = {
 ALLOWED_CONTEXT = {
     "device_cuda_call": [
         "src/runtime/device.py",  # Canonical device resolution
-        "scripts/train/train_milestone_b.py",  # Device selection in training script
+        "scripts/train/train_unified.py",  # Device selection in training script
         "scripts/eval/",  # Eval scripts may need device
         "notebooks/",  # Notebooks
     ],
     "rng_manual_seed": [
         "src/runtime/reproducibility.py",  # Canonical RNG
         "src/data/mask.py",  # BlockMasker uses Generator
-        "src/losses/sigreg.py",  # SIGReg uses Generator
         "src/runtime/physics_controls.py",  # Physics controls use Generator
         "src/data/epoch_sampler.py",  # DeterministicEpochSampler uses Generator
-        "scripts/train/train_milestone_b.py",  # Seed setting in training script
+        "src/data/scalar_mask.py",  # ScalarMasker owns a Generator
+        "scripts/train/train_unified.py",  # Seed setting in training script
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
         "scripts/eval/",  # Eval scripts
     ],
     "optimizer_adamw": [
-        "scripts/train/train_milestone_b.py",  # Canonical optimizer creation
+        "scripts/train/train_unified.py",  # Canonical optimizer creation
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
         "scripts/eval/",  # Eval scripts
     ],
     "optimizer_step": [
-        "scripts/train/train_milestone_b.py",  # Canonical optimizer step
+        "scripts/train/train_unified.py",  # Canonical optimizer step
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
         "scripts/eval/",  # Eval scripts
     ],
     "objective_on_step": [
-        "scripts/train/train_milestone_b.py",  # Canonical
+        "scripts/train/train_unified.py",  # Canonical
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
@@ -136,22 +129,21 @@ ALLOWED_CONTEXT = {
     ],
     "torch_save": [
         "src/train/engine.py",  # Canonical checkpoint save
-        "scripts/train/train_milestone_b.py",  # Training script
+        "scripts/train/train_unified.py",  # Training script
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
     ],
     "stale_model_proj": [
         "tests/",  # Tests may check for absence
-        "src/encoders/geometry_encoder.py",  # Attention.proj is a different thing
+        "src/encoders/blocks.py",  # Attention.proj is a different thing
         "src/encoders/spectrum_encoder.py",  # SpectrumEncoder.proj is a different thing
-        "src/losses/objectives.py",  # Documents the no-model.proj rule
-        "src/losses/objective_modules.py",  # Documents the no-model.proj rule
         "src/train/engine.py",  # Documents the no-model.proj rule
-        "scripts/eval/decisive_representation_validation.py",  # Documents the no-model.proj rule
+        "src/losses/unified_losses.py",  # Documents the no-model.proj rule
+        "src/losses/vicreg.py",  # Documents the no-model.proj rule
     ],
     "stale_latest_pt": [
-        "scripts/train/train_milestone_b.py",  # Training script references
+        "scripts/train/train_unified.py",  # Training script references
         "scripts/preflight/",  # Preflight scripts
         "tests/",  # Tests
         "scripts/diagnostics/",  # Diagnostics scripts
@@ -161,8 +153,6 @@ ALLOWED_CONTEXT = {
         "docs/",  # Documentation
         "checkpoints/",  # Historical reports
         "tests/",  # Tests
-        "src/losses/barlow.py",  # Documents adaptive-ladder phase
-        "src/losses/sigreg.py",  # Documents adaptive-ladder phase
         "src/train/engine.py",  # Documents removal
         "scripts/diagnostics/",  # Diagnostics may reference
         "scripts/train/",  # Training scripts may reference
@@ -172,19 +162,6 @@ ALLOWED_CONTEXT = {
         "checkpoints/",  # Historical reports
         "tests/",  # Tests
         "src/train/engine.py",  # Documents removal
-    ],
-    "stale_guidance": [
-        "docs/",  # Documentation
-        "checkpoints/",  # Historical reports
-        "tests/",  # Tests
-        "src/predictor/gclct.py",  # Documents guidance as future work
-    ],
-    "stale_routing": [
-        "docs/",  # Documentation
-        "checkpoints/",  # Historical reports
-        "tests/",  # Tests
-        "src/diagnostics/goal_token_entropy.py",  # Documents routing analysis
-        "src/predictor/gclct.py",  # Documents routing as future work
     ],
     "stale_geometry_decoder": [
         "docs/",  # Documentation
@@ -238,6 +215,7 @@ def scan_file(filepath: Path, category: str, patterns: list) -> list:
                         "pattern": pattern,
                         "category": category,
                     })
+                break  # one finding per line per category (patterns overlap)
     return findings
 
 
@@ -294,11 +272,11 @@ def main():
     # Canonical files where these patterns ARE allowed
     canonical_files = {
         "device_cuda_call": {"src/runtime/device.py"},
-        "rng_manual_seed": {"src/runtime/reproducibility.py", "src/data/mask.py", "src/losses/sigreg.py", "src/runtime/physics_controls.py", "src/train/engine.py"},
-        "optimizer_adamw": {"scripts/train/train_milestone_b.py"},
-        "optimizer_step": {"scripts/train/train_milestone_b.py"},
-        "objective_on_step": {"scripts/train/train_milestone_b.py"},
-        "torch_save": {"src/train/engine.py", "scripts/train/train_milestone_b.py"},
+        "rng_manual_seed": {"src/runtime/reproducibility.py", "src/data/mask.py", "src/runtime/physics_controls.py", "src/train/engine.py"},
+        "optimizer_adamw": {"scripts/train/train_unified.py"},
+        "optimizer_step": {"scripts/train/train_unified.py"},
+        "objective_on_step": {"scripts/train/train_unified.py"},
+        "torch_save": {"src/train/engine.py", "scripts/train/train_unified.py"},
     }
 
     has_critical = False
@@ -318,9 +296,9 @@ def main():
         print(f"\n[FAIL] Critical patterns found in non-canonical locations.")
         print("These should be consolidated into the canonical modules:")
         print("  - Device: src/runtime/device.py")
-        print("  - RNG: src/runtime/reproducibility.py, src/data/mask.py, src/losses/sigreg.py, src/runtime/physics_controls.py, src/train/engine.py")
-        print("  - Training loop: src/train/engine.py + scripts/train/train_milestone_b.py")
-        print("  - Checkpoint: src/train/engine.py + scripts/train/train_milestone_b.py")
+        print("  - RNG: src/runtime/reproducibility.py, src/data/mask.py, src/runtime/physics_controls.py, src/train/engine.py")
+        print("  - Training loop: src/train/engine.py + scripts/train/train_unified.py")
+        print("  - Checkpoint: src/train/engine.py + scripts/train/train_unified.py")
         return 1
 
     # Stale references check
@@ -329,8 +307,6 @@ def main():
         "stale_latest_pt",
         "stale_adaptive",
         "stale_loss_ladder",
-        "stale_guidance",
-        "stale_routing",
         "stale_geometry_decoder",
     ]
     has_stale = any(cat in by_category for cat in stale_categories)

@@ -134,7 +134,7 @@ def test_factorize_assemble_roundtrip_synthetic():
 # Geometry decoder
 # --------------------------------------------------------------------------
 
-def test_geometry_decoder_shapes():
+def test_occupancy_decoder_shapes():
     model = _build_model()
     z_hat = torch.randn(2, 256, 192)
     sv = torch.tensor([[1.5, 0.8, 10.0], [2.0, 1.2, 12.0]])

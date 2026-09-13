@@ -28,8 +28,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from losses.jepa_loss import jepa_loss, ProjectionMLP
-from losses.vicreg import vicreg_branch_terms
-from losses.objective_modules import VICRegProjector
+from losses.vicreg import VICRegProjector, vicreg_branch_terms
 
 
 class OccupancyTokenLoss(nn.Module):

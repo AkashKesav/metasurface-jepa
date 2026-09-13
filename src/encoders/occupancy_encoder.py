@@ -3,8 +3,9 @@
 Single-channel patch-4 ViT over occupancy M[64,64]:
     Conv2d(1, 192, k=4, s=4) -> 16x16 grid -> 256 tokens of dim 192.
 
-Reuses TransformerBlock / get_2d_sincos_pos_embed from geometry_encoder verbatim
-(grid size unchanged; only hidden dim and patch-embed input channels differ).
+Reuses TransformerBlock / get_2d_sincos_pos_embed from `encoders/blocks.py`
+verbatim (grid size unchanged; only hidden dim and patch-embed input channels
+differ).
 
 Scalar FiLM injection (§3.1): after each TransformerBlock, apply
     x = gamma * x + beta
@@ -22,7 +23,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from encoders.geometry_encoder import (
+from encoders.blocks import (
     TransformerBlock,
     get_2d_sincos_pos_embed,
 )

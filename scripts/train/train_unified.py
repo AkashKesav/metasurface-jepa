@@ -283,7 +283,8 @@ def _assert_no_ema_gradients(model, step):
 
 
 # ---------------------------------------------------------------------------
-# cosine warmup scheduler (identical to train_milestone_b.py)
+# cosine warmup scheduler (schedule inherited from the retired Milestone-B
+# trainer; kept identical)
 # ---------------------------------------------------------------------------
 
 class CosineWarmup:
@@ -476,19 +477,25 @@ def validate(model, objective, val_batches, cfg, device):
 # ---------------------------------------------------------------------------
 
 def train(cfg, resume_path=None, no_train=False, device=None,
-          use_synthetic_smoke=False):
+          use_synthetic_smoke=False, max_steps=None):
     """Main entry point. Returns a summary dict.
 
     Args:
         use_synthetic_smoke: explicit smoke mode — synthetic data and dummy
             spectrum weights allowed. Real mode (default) requires the real
             dataset and released weights and fails loudly if they are missing.
+        max_steps: override the schedule length for a verification-scale run
+            (a short 5-10% run on real data, to prove the full pipeline —
+            data loading, forward/backward, EMA updates, physics path,
+            checkpointing — before committing to the full schedule).
     """
     from train.engine import collect_ema_state
 
     set_seed(cfg["train"].get("seed", 42))
     device = device or resolve_device(cfg["train"].get("device", "cpu"))
     total_steps = cfg["train"].get("total_steps", 1500)
+    if max_steps is not None:
+        total_steps = max(1, int(max_steps))
 
     # --- data mode banner (Fix 16) ---
     def _resolved(path):
@@ -1027,7 +1034,7 @@ def preflight(cfg, device=None):
         1 for p in model.parameters()
         if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
     decoder_grads = sum(
-        1 for p in model.geometry_decoder.parameters()
+        1 for p in model.occupancy_decoder.parameters()
         if p.grad is not None and p.grad.abs().sum() > 0)
     predictor_grads = sum(
         1 for p in model.predictor.parameters()
@@ -1087,6 +1094,10 @@ def main():
     parser.add_argument("--preflight", action="store_true",
                         help="Run the real-data end-to-end preflight (Fix 17) "
                              "and exit.")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Override train.total_steps for a short "
+                             "verification-scale run (e.g. 5-10%% of the "
+                             "schedule) on real data before the full run.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -1100,7 +1111,8 @@ def main():
         return
 
     report = train(cfg, resume_path=args.resume, no_train=args.no_train,
-                   device=device, use_synthetic_smoke=args.use_synthetic_smoke)
+                   device=device, use_synthetic_smoke=args.use_synthetic_smoke,
+                   max_steps=args.max_steps)
     print(json.dumps(report, indent=2))
 
 

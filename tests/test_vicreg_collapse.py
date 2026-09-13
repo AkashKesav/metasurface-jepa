@@ -1,7 +1,7 @@
-"""Synthetic collapse / redundancy tests for the VICReg terms and the
-`jepa_vicreg` objective's anti-collapse mechanism, per the Milestone B CODEX
-spec (§22: the gates must fire on observable statistics, and the variance /
-covariance terms must demonstrably push against collapse and redundancy).
+"""Synthetic collapse / redundancy tests for the VICReg terms and the unified
+objective's anti-collapse mechanism (§22: the gates must fire on observable
+statistics, and the variance / covariance terms must demonstrably push against
+collapse and redundancy).
 
 Covers:
   - exact-math contract (V1/V2): variance_loss and covariance_loss must equal
@@ -9,8 +9,6 @@ Covers:
     off-diagonal squared-sum / D covariance)
   - branch aggregation (V3): L_var averages the two branches (0.5 each),
     L_cov SUMS them (no accidental 0.5 factor)
-  - total objective (V4): total = 25*L_inv + 25*L_var + 1*L_cov, no hidden
-    normalization
   - constant input: variance penalty at its max, covariance zero, total > 0
   - collapsed target branch (V5): p_y constant cannot zero the objective
   - healthy Gaussian: variance penalty near zero, lower than the collapsed case
@@ -24,6 +22,10 @@ Covers:
     (adversarial: raw full rank, final layer initialized near rank-1, only
     variance+covariance optimized; projected effective rank + variance +
     covariance before/after reported)
+
+The V4 total-objective case exercised the retired `VICRegObjective` registry
+(removed 2026-09-13); the unified objective's own weighted-total contract is
+covered in tests/test_unified_losses.py.
 """
 
 import os
@@ -168,39 +170,6 @@ def test_v3_branch_aggregation_var_averaged_cov_summed():
         "reintroduced")
 
 
-def test_v4_total_objective_25_25_1_with_defaults():
-    """Total objective (V4): with default coefficients the total must be
-    exactly 25*L_inv + 25*L_var + 1*L_cov — no hidden normalization."""
-    torch.manual_seed(14)
-    from losses.objectives import VICRegObjective
-
-    class _Stub(nn.Module):
-        def __init__(self, B=2, T=256, D=8):
-            super().__init__()
-            self.ema = nn.Module()
-            self.geometry_encoder = None
-            self.z_hat = nn.Parameter(torch.randn(B, T, D))
-            self.z_y = nn.Parameter(torch.randn(B, T, D))
-
-        def forward(self, G, S, M):
-            B = G.shape[0]
-            mask = (M.view(B, -1) == 0)
-            return {"z_hat": self.z_hat, "z_y_raw": self.z_y, "mask": mask}
-
-    G = torch.randn(2, 3, 64, 64)
-    S = torch.randn(2, 301)
-    M = torch.ones(2, 256)
-    M[:, :8] = 0                       # N = 16 masked tokens
-    obj = VICRegObjective(projector_input_dim=8, projector_hidden_dim=16,
-                          projector_output_dim=8)
-    res = obj(_Stub(), G, S, M)
-    c = res["components"]
-    expected = 25.0 * c["L_inv"] + 25.0 * c["L_var"] + 1.0 * c["L_cov"]
-    assert torch.allclose(res["total_loss"], expected, atol=1e-6)
-    assert c["lambda_inv"] == 25.0 and c["lambda_var"] == 25.0 \
-        and c["lambda_cov"] == 1.0
-
-
 def test_v5_collapsed_target_branch_py_constant_keeps_objective_positive():
     """Collapsed target branch (V5): p_hat healthy, p_y a constant — the
     objective cannot go to zero on a collapsed branch (L_var > 0, total > 0)."""
@@ -254,7 +223,7 @@ def test_projector_collapse_detected_and_recovered():
     backend-robust.
     """
     torch.manual_seed(6)
-    from losses.objective_modules import VICRegProjector
+    from losses.vicreg import VICRegProjector
     N, D = 64, 8
     z = torch.randn(N, D)
     raw_rank = eff_ranks(z)["eff_rank_frac"]

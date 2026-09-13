@@ -22,7 +22,6 @@ import torch
 import torch.nn as nn
 
 from assembly import load_into_model, saveable_state_dict  # noqa: E402
-from losses.objectives import VICRegObjective  # noqa: E402
 from train.engine import (  # noqa: E402
     collect_ema_state, load_checkpoint, restore_ema_state, save_checkpoint,
 )
@@ -52,10 +51,26 @@ class _SmallModel(nn.Module):
         raise NotImplementedError("state round-trip only")
 
 
+class _ParamObjective(nn.Module):
+    """Minimal parametric objective stand-in (owns a projector-like parameter).
+
+    Replaces the retired `VICRegObjective` (the objective registry was deleted in
+    the 2026-09-13 legacy retirement); these tests exercise the engine's
+    checkpoint/resume contract, which is objective-agnostic.
+    """
+
+    name = "jepa_vicreg"
+
+    def __init__(self):
+        super().__init__()
+        self.projector = nn.Linear(4, 4)
+
+    def forward(self, *a):
+        raise NotImplementedError("state round-trip only")
+
+
 def _objective():
-    return VICRegObjective(
-        lambda_inv=1.0, lambda_var=1.0, lambda_cov=1.0,
-        projector_input_dim=4, projector_hidden_dim=8, projector_output_dim=4)
+    return _ParamObjective()
 
 
 def _model_and_opt(seed=0, in_feat=4, out_feat=4):
@@ -270,8 +285,8 @@ def test_collect_restore_ema_state_roundtrip():
 
 
 def test_model_only_best_checkpoint_loadable(tmp_path):
-    """train_milestone_b saves `{exp}_{objective}_best_model.pt` as a plain
-    model state dict; it must round-trip through the standard helpers."""
+    """A bare best-model artifact (plain model state dict, no wrapper dict) must
+    round-trip through the standard helpers."""
     path = str(tmp_path / "best_model.pt")
     m1, _, _, _ = _model_and_opt(seed=0)
     sd = saveable_state_dict(m1)

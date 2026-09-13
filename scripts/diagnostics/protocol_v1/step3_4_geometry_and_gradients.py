@@ -10,7 +10,7 @@ Step 3 conditions (decoder fed the EMA target latent z_y):
 
 Step 4: backward each loss term separately (zero grad between terms), record
 per-module grad norms; verify the structural zero (JEPA/VICReg terms must
-produce exactly zero gradient in geometry_decoder / scalar_decoder); compute
+produce exactly zero gradient in occupancy_decoder / scalar_decoder); compute
 gradient cosine between weighted L_phys and L_inv+L_var+L_cov on shared params.
 """
 import os, sys, json
@@ -36,7 +36,7 @@ from runtime.reproducibility import set_seed
 REAL_AVAILABLE = os.path.exists(os.path.join(REPO, "data/metadit/split_data/train_set.mat"))
 
 MODULES = ["occupancy_encoder", "fusion_encoder", "predictor",
-           "geometry_decoder", "scalar_decoder", "scalar_encoder"]
+           "occupancy_decoder", "scalar_decoder", "scalar_encoder"]
 
 
 def iou_f1(pred_bin, true_bin):
@@ -108,7 +108,7 @@ def main():
         hardA, softA, geomA = decode(z_y, sv_true)
         iouA, f1A = iou_f1(hardA, occ_true)
         bceA = F.binary_cross_entropy_with_logits(
-            model.geometry_decoder(z_y, sv_true), occ_true).item()
+            model.occupancy_decoder(z_y, sv_true), occ_true).item()
         results3["A_true_scalars"] = {
             "iou": round(iouA, 4), "f1": round(f1A, 4),
             "pred_occ_frac": round(hardA.mean().item(), 4),
@@ -117,7 +117,7 @@ def main():
         hardB, softB, geomB = decode(z_y, scalar_pred)
         iouB, f1B = iou_f1(hardB, occ_true)
         bceB = F.binary_cross_entropy_with_logits(
-            model.geometry_decoder(z_y, scalar_pred), occ_true).item()
+            model.occupancy_decoder(z_y, scalar_pred), occ_true).item()
         results3["B_pred_scalars"] = {
             "iou": round(iouB, 4), "f1": round(f1B, 4),
             "pred_occ_frac": round(hardB.mean().item(), 4),
@@ -186,9 +186,9 @@ def main():
     # structural zero check
     struct = {}
     for t in ("L_inv", "L_var", "L_cov"):
-        gd = grad_table[t]["geometry_decoder"]
+        gd = grad_table[t]["occupancy_decoder"]
         sd = grad_table[t]["scalar_decoder"]
-        struct[t] = {"geometry_decoder": gd, "scalar_decoder": sd,
+        struct[t] = {"occupancy_decoder": gd, "scalar_decoder": sd,
                      "structural_zero_ok": (gd == 0.0 and sd == 0.0)}
     print("STEP4 structural:", json.dumps(struct, indent=2), flush=True)
 

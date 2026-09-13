@@ -6,13 +6,15 @@ Covers:
 2. set_epoch advances the stream reproducibly (epoch N permutation is a pure
    function of (seed, N)).
 3. Skip-k equivalence: consuming batches [k:] of the full epoch sees exactly
-   the item sequence a mid-epoch-resumed run must observe — i.e., the sampler
+   the item sequence a mid-epoch-resumed run must observe — i.e. the sampler
    carries no hidden per-instance state that a fresh construction would lose.
-4. Production wiring: train_milestone_b.py must construct this sampler with
-   DataLoader(shuffle=False) — any shuffle=True would silently break exact
-   resume (Bug #3 class).
-5. Audit hygiene: the sampler module seeds via explicit torch.Generator only,
+4. Audit hygiene: the sampler module seeds via explicit torch.Generator only,
    never global np.random.seed / torch.manual_seed.
+
+(The two static checks against `scripts/train/train_milestone_b.py` — replaced
+sampler wiring and fork_rng(devices=[]) — were removed with the legacy trainer
+in the 2026-09-13 retirement; the unified trainer re-creates its loaders and
+relies on checkpoint-restore of the torch RNG state instead.)
 """
 
 import os
@@ -93,32 +95,6 @@ def test_sampler_is_a_pure_function_of_seed_and_epoch():
         "ambient RNG state instead of its own seeded generator")
 
 
-def test_production_script_uses_deterministic_sampler_no_shuffle():
-    """Static wiring check: the production driver must use
-    DeterministicEpochSampler + DataLoader(shuffle=False)."""
-    path = os.path.join(REPO_ROOT, "scripts", "train", "train_milestone_b.py")
-    with open(path, "r") as f:
-        src = f.read()
-    assert "DeterministicEpochSampler" in src, \
-        "production driver must use DeterministicEpochSampler"
-    # find the DataLoader construction and require shuffle=False there
-    idx = src.find("DataLoader(")
-    assert idx != -1, "no DataLoader construction found in production driver"
-    call = src[idx:src.find(")", idx) + 1]
-    assert "shuffle=False" in call, \
-        "DataLoader must be constructed with shuffle=False when using a sampler"
-
-
-def test_production_script_fork_rng_excludes_cuda():
-    """fork_rng(devices=[]) for iterator creation — only CPU RNG isolation is
-    needed; forking every visible CUDA device triggers a warning."""
-    path = os.path.join(REPO_ROOT, "scripts", "train", "train_milestone_b.py")
-    with open(path, "r") as f:
-        src = f.read()
-    assert "torch.random.fork_rng(devices=[])" in src, \
-        "production driver must use fork_rng(devices=[]) for iterator creation"
-
-
 def test_process_level_permutation_stability():
     """Two independent OS processes produce byte-identical permutations for the
     same (seed, epoch) — the actual property cloud resume depends on."""
@@ -152,8 +128,6 @@ if __name__ == "__main__":
     test_epoch_advances_stream_reproducibly()
     test_skip_k_equivalent_to_fresh_construction()
     test_sampler_is_a_pure_function_of_seed_and_epoch()
-    test_production_script_uses_deterministic_sampler_no_shuffle()
-    test_production_script_fork_rng_excludes_cuda()
     test_process_level_permutation_stability()
     test_sampler_module_has_no_global_seeding()
     print("PASS: all A5 epoch-sampler resume tests")

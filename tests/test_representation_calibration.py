@@ -1,21 +1,23 @@
 """B9 — Representation calibration smoke tests.
 
-Covers:
+Covers the pure-math diagnostics shared by the unified evaluators:
+
 1. grouped_view is a pure view (no recomputation) of an existing token_space_stats dict.
-2. identical geometry subset: two encoders evaluated on the same geoms/order produce stats
-   dicts with the same n_geoms.
-3. mean-pooled uses X.mean(dim=1) — calling with (N, T, D) and pre-pooled (N, D) gives
+2. mean-pooled uses X.mean(dim=1) — calling with (N, T, D) and pre-pooled (N, D) gives
    the same result for mean_pooled keys.
-4. same-token fixed positions: same_token_cos is invariant to column permutation
+3. same-token fixed positions: same_token_cos is invariant to column permutation
    (relabeling spatial tokens) of a (N, T, D) tensor.
-5. geometry_linear_probes are finite and deterministic (same inputs -> identical R^2).
-6. VICReg gradient attribution: gradient norms finite for each component, EMA gradients
-   always None, parameter checksums unchanged.
+4. geometry_linear_probes are finite and deterministic (same inputs -> identical R^2).
+
+The two VICReg-gradient-attribution cases and the random-calibration-encoder RNG
+case exercised the retired 384-D `build_model` / `losses.objectives` /
+`representation_calibration.py` path; they were removed with it in the 2026-09-13
+legacy retirement. Gradient-ownership coverage for the live path lives in
+tests/test_unified_model_phase2.py and tests/test_phase5_contracts.py.
 """
 
 import os
 import sys
-import tempfile
 
 import torch
 import numpy as np
@@ -41,19 +43,6 @@ def test_grouped_view_is_pure_view():
     # values are aliases, not copies — same object
     assert gv["token_level"]["token_std"] is flat["token_std"]
     assert gv["mean_pooled"]["eff_rank_frac"] is flat["eff_rank_frac"]
-
-
-def test_identical_subset_same_ng():
-    """Two encoders on the same geoms produce same n_geoms."""
-    from diagnostics.representation_health import encoder_stats
-    from encoders.geometry_encoder import GeometryEncoder
-    geoms = [torch.randn(8, 3, 64, 64) for _ in range(3)]
-    enc1 = GeometryEncoder(hidden=64, num_heads=4, depth=1)
-    enc2 = GeometryEncoder(hidden=64, num_heads=4, depth=1)
-    s1 = encoder_stats(enc1, geoms, torch.device("cpu"), 16)
-    s2 = encoder_stats(enc2, geoms, torch.device("cpu"), 16)
-    assert s1["n_geoms"] == s2["n_geoms"], (s1["n_geoms"], s2["n_geoms"])
-    assert s1["n_geoms"] == 16
 
 
 def test_mean_pooled_matches_manual_pooling():
@@ -103,140 +92,9 @@ def test_geometry_linear_probes_finite_and_deterministic():
         assert r1[key] == r2[key], f"{key} not deterministic"
 
 
-def test_vicreg_gradient_attribution_ema_no_grads():
-    """Build a tiny model + objective, run one forward/backward, verify EMA params
-    have no gradients and parameter checksums unchanged."""
-    from assembly import build_model
-    from losses.objectives import build_objective
-    from data.mask import BlockMasker
-
-    hidden = 64
-    model_cfg = {
-        "variant": "jepa", "patch_size": 4, "token_grid": 16,
-        "hidden": hidden, "num_heads": 4, "num_predictor_heads": 2,
-        "geo_depth": 1, "predictor_depth": 1,
-        "goal_tokens": 16, "num_goal_heads": 4,
-        "ema_momentum_start": 0.99, "ema_momentum_end": 0.999,
-        "init_from_metadit": False,
-    }
-    weights_dir = os.path.join(REPO_ROOT, "data", "metadit", "weights")
-    spec_path = os.path.join(weights_dir, "spec_encoder.pth")
-    model = build_model(model_cfg, spec_path, device=torch.device("cpu"),
-                        init_from_metadit=False,
-                        metadit_weights=os.path.join(weights_dir, "metadit-small.bin"))
-    objective = build_objective(
-        "jepa_vicreg",
-        {"projector": {"input_dim": hidden, "hidden_dim": hidden,
-                       "output_dim": hidden},
-         "lambda_inv": 25, "lambda_var": 25, "lambda_cov": 1},
-        projector_input_dim=hidden,
-    )
-    model.train()
-    objective.train()
-
-    masker = BlockMasker(placement="random", seed=12345)
-    G = torch.randn(4, 3, 64, 64)
-    S = torch.randn(4, 2, 301)
-    M = masker.sample(G, 0.5)
-
-    # checksum before
-    def _cs():
-        return sum(p.detach().double().sum().item()
-                   for m in (model, objective) for p in m.parameters())
-    cs_before = _cs()
-
-    ema_params = list(model.ema.parameters())
-    for comp in ("L_inv", "L_var", "L_cov"):
-        model.zero_grad(set_to_none=True)
-        objective.zero_grad(set_to_none=True)
-        res = objective(model, G, S, M)
-        loss = res["components"][comp]
-        loss.backward()
-        # EMA must not have gradients
-        leaked = [i for i, p in enumerate(ema_params) if p.grad is not None]
-        assert not leaked, f"EMA gradients after {comp}: {leaked}"
-
-    assert _cs() == cs_before, "parameters mutated during gradient attribution"
-
-
-def test_vicreg_gradient_attribution_grad_norms_finite():
-    from assembly import build_model
-    from losses.objectives import build_objective
-    from data.mask import BlockMasker
-
-    hidden = 64
-    model_cfg = {
-        "variant": "jepa", "patch_size": 4, "token_grid": 16,
-        "hidden": hidden, "num_heads": 4, "num_predictor_heads": 2,
-        "geo_depth": 1, "predictor_depth": 1,
-        "goal_tokens": 16, "num_goal_heads": 4,
-        "ema_momentum_start": 0.99, "ema_momentum_end": 0.999,
-        "init_from_metadit": False,
-    }
-    weights_dir = os.path.join(REPO_ROOT, "data", "metadit", "weights")
-    spec_path = os.path.join(weights_dir, "spec_encoder.pth")
-    model = build_model(model_cfg, spec_path, device=torch.device("cpu"),
-                        init_from_metadit=False,
-                        metadit_weights=os.path.join(weights_dir, "metadit-small.bin"))
-    objective = build_objective(
-        "jepa_vicreg",
-        {"projector": {"input_dim": hidden, "hidden_dim": hidden,
-                       "output_dim": hidden},
-         "lambda_inv": 25, "lambda_var": 25, "lambda_cov": 1},
-        projector_input_dim=hidden,
-    )
-    model.train()
-    objective.train()
-
-    masker = BlockMasker(placement="random", seed=12345)
-    G = torch.randn(4, 3, 64, 64)
-    S = torch.randn(4, 2, 301)
-    M = masker.sample(G, 0.5)
-
-    groups = {
-        "geometry_encoder": list(model.geometry_encoder.parameters()),
-        "projector": list(objective.projector.parameters()),
-        "predictor": list(model.predictor.parameters()),
-    }
-
-    for comp in ("L_inv", "L_var", "L_cov"):
-        model.zero_grad(set_to_none=True)
-        objective.zero_grad(set_to_none=True)
-        res = objective(model, G, S, M)
-        loss = res["components"][comp]
-        loss.backward()
-        for gname, params in groups.items():
-            sq = sum(p.grad.detach().pow(2).sum().item()
-                     for p in params if p.grad is not None)
-            norm = sq ** 0.5
-            assert np.isfinite(norm), f"{comp}/{gname} grad norm is not finite: {norm}"
-
-
-def test_calibration_does_not_change_global_torch_rng():
-    """The calibration's random encoder construction must not mutate the global
-    torch RNG state — build_random_calibration_encoder uses fork_rng internally."""
-    from scripts.diagnostics.representation_calibration import (
-        build_random_calibration_encoder,
-    )
-    torch.manual_seed(1234)
-    state_before = torch.get_rng_state().clone()
-
-    build_random_calibration_encoder(
-        hidden=64, heads=4, depth=1, seed=0, device=torch.device("cpu"),
-    )
-
-    state_after = torch.get_rng_state()
-    assert torch.equal(state_before, state_after), (
-        "global torch RNG state changed by random encoder construction")
-
-
 if __name__ == "__main__":
     test_grouped_view_is_pure_view()
-    test_identical_subset_same_ng()
     test_mean_pooled_matches_manual_pooling()
     test_same_token_cos_column_permutation_invariant()
     test_geometry_linear_probes_finite_and_deterministic()
-    test_vicreg_gradient_attribution_ema_no_grads()
-    test_vicreg_gradient_attribution_grad_norms_finite()
-    test_calibration_does_not_change_global_torch_rng()
     print("PASS: all B9 representation calibration tests")

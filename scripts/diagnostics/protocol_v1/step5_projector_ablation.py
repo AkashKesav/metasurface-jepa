@@ -175,7 +175,7 @@ def run_variant(tag, freeze_projector, lambda_raw, steps=500):
         if p.grad is not None:
             p.grad = None
     (cfg["loss"]["lambda_phys"] * Lp).backward()
-    gd = sum(p.grad.norm().item() ** 2 for p in model.geometry_decoder.parameters()
+    gd = sum(p.grad.norm().item() ** 2 for p in model.occupancy_decoder.parameters()
              if p.grad is not None) ** 0.5
 
     final = {"geometry_A_iou": round(iou, 4), "geometry_A_f1": round(f1, 4),

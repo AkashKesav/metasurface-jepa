@@ -360,7 +360,7 @@ def test_physics_gradient_regression():
 
     # 2. Geometry input (via decoder) must have gradient path
     decoder_has_grad = any(p.grad is not None
-                           for p in model.geometry_decoder.parameters()
+                           for p in model.occupancy_decoder.parameters()
                            if p.requires_grad)
     assert decoder_has_grad, "decoder must receive physics gradient"
 

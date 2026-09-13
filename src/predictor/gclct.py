@@ -27,7 +27,7 @@ no pixel head in this path.
 import torch
 from torch import nn
 
-from encoders.geometry_encoder import CrossAttention, Attention
+from encoders.blocks import CrossAttention, Attention
 
 
 class GCLCTBlock(nn.Module):

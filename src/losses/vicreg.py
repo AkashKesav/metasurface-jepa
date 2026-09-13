@@ -1,6 +1,6 @@
 """VICReg loss terms (Bardes et al. 2021) for the `jepa_vicreg` objective.
 
-Canonical term functions used by `VICRegObjective` (src/losses/objectives.py):
+Canonical term functions used by `UnifiedJEPALoss` (src/losses/unified_losses.py):
 
     L_inv = MSE(p_hat, p_y)                                          (invariance)
     L_var = 0.5 * (var_penalty(p_hat) + var_penalty(p_y))            (variance)
@@ -41,6 +41,7 @@ during real training").
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 
 def _require_n2(Z, name):
@@ -111,3 +112,45 @@ def vicreg_branch_terms(p_hat, p_y, gamma=1.0, eps=1e-4):
     L_cov = (covariance_loss(p_hat, eps)
              + covariance_loss(p_y, eps))
     return L_inv, L_var, L_cov
+
+
+class _MLPProjector(nn.Module):
+    """Shared MLP layout (official VICReg-style projector: BatchNorm between
+    hidden layers; final layer has no bias).
+
+    Operates on the last dim of any leading shape (B, T, D) or (N, D):
+    BatchNorm statistics are computed over the flattened token/sample axis —
+    the same convention the objective's masked-token statistics use.
+
+    Moved here from `losses/objective_modules.py` in the 2026-09-13 legacy
+    retirement; only `VICRegProjector` is left, because it is the one projector
+    the active unified objective owns (the Barlow/LeJEPA projectors belonged to
+    the retired objective registry).
+    """
+
+    def __init__(self, input_dim=384, hidden_dim=384, output_dim=384):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, bias=True),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(hidden_dim, hidden_dim, bias=True),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(hidden_dim, output_dim, bias=False),
+        )
+
+    def forward(self, z):
+        original_shape = z.shape
+        z = z.reshape(-1, original_shape[-1])
+        z = self.net(z)
+        return z.reshape(*original_shape[:-1], -1)
+
+
+class VICRegProjector(_MLPProjector):
+    """Learned projection head owned by the unified JEPA objective
+    (`losses/unified_losses.py`; spec §17: objective-owned — there is no
+    `model.proj`)."""

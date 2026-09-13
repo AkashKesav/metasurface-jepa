@@ -1,5 +1,10 @@
-"""Phase 1 geometry decoder: frozen EMA latent → pixel-space geometry."""
+"""Decoders for the unified 192-D architecture (architecture_v5.md §4).
 
-from .geometry_decoder import GeometryDecoder
+OccupancyDecoder : predicted occupancy tokens -> occupancy logits (FiLM-conditioned)
+ScalarDecoder    : predicted scalar-summary latent -> (l, h, r) heads
+"""
 
-__all__ = ["GeometryDecoder"]
+from .occupancy_decoder import OccupancyDecoder
+from .scalar_decoder import ScalarDecoder
+
+__all__ = ["OccupancyDecoder", "ScalarDecoder"]

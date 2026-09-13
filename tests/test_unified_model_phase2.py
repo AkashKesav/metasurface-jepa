@@ -422,26 +422,20 @@ def test_checkpoint_round_trip():
 
 
 def test_old_checkpoint_not_compatible():
-    """Loading a 384-D legacy checkpoint into the 192-D unified model must fail."""
-    from assembly import GoalConditionedJEPA
+    """Loading a legacy 384-D checkpoint into the 192-D unified model must fail.
 
+    The legacy model class was retired (2026-09-13), so the legacy-width state
+    dict is synthesized: a bare 384-D module contributes keys/shapes that no
+    unified component expects, and the strict loader must refuse the load
+    (architecture_v5.md: no slicing/cropping 384-D tensors into 192-D).
+    """
     torch.manual_seed(0)
-    old = GoalConditionedJEPA(hidden=384, num_heads=6, geo_depth=2, predictor_depth=4)
-    # stub
-    _make_stub_spectrum_path_for_old(old)
-    old_sd = saveable_state_dict(old)
+    legacy = nn.Linear(384, 384)          # stand-in carrying 384-D-shaped keys
+    old_sd = {f"occupancy_encoder.{k}": v for k, v in legacy.state_dict().items()}
 
     unified = build_model()
     with pytest.raises(RuntimeError, match="checkpoint/model key mismatch"):
         load_into_model(unified, old_sd, torch.device("cpu"), strict=True)
-
-
-def _make_stub_spectrum_path_for_old(model):
-    stub = _StubReleasedEncoder()
-    for p in stub.parameters():
-        p.requires_grad_(False)
-    stub.eval()
-    model.spectrum_path.released = stub
 
 
 # --------------------------------------------------------------------------

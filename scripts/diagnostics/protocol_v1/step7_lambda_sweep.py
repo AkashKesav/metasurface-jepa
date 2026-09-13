@@ -63,7 +63,7 @@ def grad_norms_for(model, out, surrogate, occ, sv, sk, spec, M, lam):
             if p.grad is not None:
                 s += p.grad.norm().item() ** 2
         return round(s ** 0.5, 6)
-    return {"decoder": gn("geometry_decoder"), "encoder": gn("occupancy_encoder"),
+    return {"decoder": gn("occupancy_decoder"), "encoder": gn("occupancy_encoder"),
             "predictor": gn("predictor")}
 
 

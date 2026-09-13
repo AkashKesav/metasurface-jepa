@@ -11,13 +11,14 @@ Inputs:
 Token layout (exact, row-major): 256 occupancy | 16 goal | 1 scalar-summary.
 
 Depth is pinned at 2 layers per architecture_v5.md §3.4 (was open in earlier
-drafts). Uses the same TransformerBlock / Attention classes from geometry_encoder.
+drafts). Uses the same TransformerBlock / Attention classes as the other stacks
+(`encoders/blocks.py`).
 """
 
 import torch
 from torch import nn
 
-from encoders.geometry_encoder import TransformerBlock
+from encoders.blocks import TransformerBlock
 
 HIDDEN = 192
 N_OCC_TOKENS = 256
