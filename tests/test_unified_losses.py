@@ -155,6 +155,35 @@ def test_unified_loss_returns_dict():
     assert "projector_outputs" in result
 
 
+def test_occupancy_bce_supervises_decoder_when_physics_off():
+    """Operator decision 2026-09-13 (audit §4): L_occ = BCEWithLogits(logits,
+    true occupancy) on MASKED pixels (architecture_v5.md §4.1).
+
+    Without this term the occupancy decoder is trained only through the physics
+    path, so it receives no gradient at all while lambda_phys = 0.
+    """
+    model = _build_model()
+    model.train()
+    objective = UnifiedJEPALoss(hidden=192, lambda_phys=0.0, lambda_occ=1.0)
+    objective.train()
+    occ, sv, spec, M = _batch(seed=5)
+    sk = torch.ones(2, 3, dtype=torch.bool)
+    model.zero_grad(set_to_none=True)
+    result = objective(model, occ, sv, sk, spec, M)
+    c = result["components"]
+    assert c["L_occ"] > 0.0, f"L_occ must be active/pixel, got {c['L_occ']}"
+    assert abs(c["L_occ_weighted"] - c["L_occ"]) < 1e-9, c
+    result["total_loss"].backward()
+    head_grads = [p for p in model.occupancy_decoder.head.parameters()
+                  if p.grad is not None and p.grad.abs().sum() > 0]
+    assert head_grads, (
+        "the occupancy decoder must receive gradient from the BCE term when "
+        "the physics path is off")
+    # The BCE term alone must not train the frozen references.
+    for name, p in model.ema.named_parameters():
+        assert p.grad is None or p.grad.abs().sum() == 0, name
+
+
 def test_loss_components_finite():
     model = _build_model()
     objective = UnifiedJEPALoss(hidden=192)

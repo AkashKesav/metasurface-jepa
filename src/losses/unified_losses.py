@@ -108,10 +108,11 @@ class UnifiedJEPALoss(nn.Module):
     """
 
     name = "unified_jepa"
-    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_phys")
+    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys")
 
     def __init__(self, hidden=192, lambda_inv=25.0, lambda_var=25.0,
                  lambda_cov=1.0, lambda_scalar=1.0, lambda_phys=0.0,
+                 lambda_occ=0.0,
                  gamma=1.0, eps=1e-4, scalar_loss_type="l1",
                  surrogate=None, physics_use_ste=True):
         super().__init__()
@@ -123,6 +124,7 @@ class UnifiedJEPALoss(nn.Module):
         self.lambda_cov = lambda_cov
         self.lambda_scalar = lambda_scalar
         self.lambda_phys = lambda_phys
+        self.lambda_occ = lambda_occ
         self.gamma = gamma
         self.eps = eps
         self.surrogate = surrogate  # frozen MetaDiT EM surrogate (Phase 4)
@@ -195,17 +197,42 @@ class UnifiedJEPALoss(nn.Module):
             L_phys = self.physics_loss(
                 out.get("spectrum_target", spectrum), spectrum)
 
+        # Occupancy BCE (architecture_v5.md §4.1; operator decision 2026-09-13):
+        # direct supervision of the decoder on MASKED pixels. Without it the
+        # decoder is trained only through the physics path, so it receives no
+        # gradient at all while lambda_phys = 0 (staging B). Visible pixels are
+        # retained at assembly (never overwritten), so the decoder is asked to
+        # infer only what was masked — the same masked-region convention as the
+        # latent objective.
+        if self.lambda_occ > 0:
+            occ_logits = model.decode_occupancy_logits(
+                z_hat, out["scalar_pred"],
+                scalar_known=scalar_known, scalar_values=scalar_values)
+            b = occ_logits.shape[0]
+            masked_px = out["mask"].view(b, 1, 16, 16).repeat_interleave(
+                4, 2).repeat_interleave(4, 3) > 0.5          # (B,1,64,64)
+            if masked_px.any():
+                L_occ = F.binary_cross_entropy_with_logits(
+                    occ_logits[masked_px], occupancy[masked_px])
+            else:
+                L_occ = torch.zeros((), device=occ_logits.device)
+        else:
+            L_occ = torch.zeros((), device=z_hat.device)
+
         total = (L_inv_w + L_var_w + L_cov_w
                  + self.lambda_scalar * L_scalar
+                 + self.lambda_occ * L_occ
                  + self.lambda_phys * L_phys)
 
         out["loss_components"] = {
             "L_inv": float(L_inv.detach()), "L_var": float(L_var.detach()),
             "L_cov": float(L_cov.detach()),
-            "L_scalar": float(L_scalar.detach()), "L_phys": float(L_phys.detach()),
+            "L_scalar": float(L_scalar.detach()), "L_occ": float(L_occ.detach()),
+            "L_phys": float(L_phys.detach()),
             "L_inv_weighted": float(L_inv_w.detach()),
             "L_var_weighted": float(L_var_w.detach()),
             "L_cov_weighted": float(L_cov_w.detach()),
+            "L_occ_weighted": float((self.lambda_occ * L_occ).detach()),
             "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
             "L_total": float(total.detach()),
         }

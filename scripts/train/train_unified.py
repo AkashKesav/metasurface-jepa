@@ -100,6 +100,11 @@ def _validate_config(cfg):
 
     staging_phase = str(cfg.get("staging", {}).get("phase", "")).upper()
     lambda_phys = float(cfg.get("loss", {}).get("lambda_phys", 0.0))
+    for key in ("lambda_inv", "lambda_var", "lambda_cov", "lambda_scalar",
+                "lambda_occ", "lambda_phys"):
+        val = cfg.get("loss", {}).get(key)
+        if val is not None and float(val) < 0:
+            raise ValueError(f"loss.{key} must be >= 0, got {val}")
     if lambda_phys > 0 and staging_phase in ("A", "B"):
         raise ValueError(
             f"staging.phase={staging_phase!r} is a no-physics stage but "
@@ -698,6 +703,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         # Audit B17: the Huber branch was unreachable — the config key was
         # never read.
         scalar_loss_type=loss_cfg.get("scalar_loss_type", "l1"),
+        # Operator decision 2026-09-13: §4.1 occupancy BCE (decoder supervision
+        # independent of the physics path).
+        lambda_occ=loss_cfg.get("lambda_occ", 0.0),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),
     ).to(device)
