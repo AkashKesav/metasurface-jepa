@@ -66,6 +66,43 @@ def _batch(seed=0, b=2):
     return occ, sv, spec
 
 
+def test_evaluate_scenario_occupancy_metrics_use_raw_probability():
+    """Audit B7: occupancy IoU/F1/fraction must come from the model's RAW sigmoid
+    occupancy.
+
+    The retained/hard-thresholded occupancy used for the deployed geometry copies
+    ground truth on visible pixels, so the visible-region IoU is identically 1.0
+    by construction and the model's true occupancy quality is never measured.
+    """
+    from scripts.eval.eval_scenarios import evaluate_scenario
+
+    class _SurrOut:
+        def __init__(self, prediction):
+            self.prediction = prediction
+
+    class _Surr(nn.Module):
+        def forward(self, x):
+            return _SurrOut(torch.zeros(x.shape[0], 2, 301))
+
+    model = _build_model()
+    # Force the raw occupancy probability low everywhere: an all-empty design.
+    with torch.no_grad():
+        model.occupancy_decoder.head.bias.fill_(-100.0)
+
+    occ, sv, spec = _batch(seed=7)
+    masker = BlockMasker(placement="random", grid=16, min_side=3,
+                         k_range=(1, 4), seed=3)
+    M = masker.sample(occ, 0.5)
+    sk = torch.ones(2, 3, dtype=torch.bool)
+
+    res = evaluate_scenario(model, _Surr(), occ, sv, spec, M, sk, "cpu", "A")
+    # Ground truth has occupied pixels; predicting "nothing occupied" must not
+    # score a perfect visible-region IoU (it does pre-fix: GT is retained).
+    assert res["visible_region"]["iou"] < 0.5, res
+    assert res["masked_region"]["iou"] < 0.5, res
+    assert res["pred_occupancy_fraction"] < 0.01, res
+
+
 def test_scenario_masks_transferred_to_device():
     """Item 1: the scenario evaluator's masks must be on the model device
     (masker.sample returns CPU tensors). Regression: with a CUDA occupancy

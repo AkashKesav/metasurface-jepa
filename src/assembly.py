@@ -338,6 +338,28 @@ class UnifiedJEPA(nn.Module):
 
         return out
 
+    def _effective_scalars(self, scalar_pred, scalar_known=None,
+                           scalar_values=None):
+        """Decode-time scalar rule (architecture_v5.md §4.1): the true value where
+        the scalar is known, the prediction where unknown — identical in training
+        and inference."""
+        if scalar_known is not None and scalar_values is not None:
+            return torch.where(scalar_known, scalar_values, scalar_pred)
+        return scalar_pred
+
+    def decode_occupancy_prob(self, z_hat, scalar_pred, scalar_known=None,
+                              scalar_values=None):
+        """Raw sigmoid occupancy probability [B,1,64,64] — no thresholding, no
+        visible-pixel retention.
+
+        This is the occupancy-QUALITY diagnostic branch (IoU/F1/fraction in the
+        evaluator); it is never the deployed geometry — deployment uses
+        decode_geometry's retained, hard-thresholded occupancy (audit B7).
+        """
+        scalars = self._effective_scalars(scalar_pred, scalar_known,
+                                          scalar_values)
+        return torch.sigmoid(self.occupancy_decoder(z_hat, scalars))
+
     def decode_geometry(self, z_hat, scalar_pred, occ_input=None, mask=None,
                         scalar_known=None, scalar_values=None, use_ste=False,
                         hard_forward=False):
@@ -370,15 +392,13 @@ class UnifiedJEPA(nn.Module):
         # Effective scalar rule (architecture_v5.md §4.1): decode-time FiLM and
         # assembly use the true value where known, the prediction where unknown —
         # identical in training and inference.
-        if scalar_known is not None and scalar_values is not None:
-            scalar_for_assembly = torch.where(
-                scalar_known, scalar_values, scalar_pred)
-        else:
-            scalar_for_assembly = scalar_pred
+        scalar_for_assembly = self._effective_scalars(
+            scalar_pred, scalar_known, scalar_values)
 
-        # Decoder is FiLM-conditioned by the effective (l,h,r).
-        occ_logits = self.occupancy_decoder(z_hat, scalar_for_assembly)
-        soft_occ = torch.sigmoid(occ_logits)  # (B, 1, 64, 64)
+        # Decoder is FiLM-conditioned by the effective (l,h,r); soft_occ is the
+        # raw sigmoid probability, thresholded/retained below for deployment.
+        soft_occ = self.decode_occupancy_prob(
+            z_hat, scalar_pred, scalar_known, scalar_values)  # (B, 1, 64, 64)
 
         if use_ste and self.training:
             hard_occ = (soft_occ > 0.5).float()

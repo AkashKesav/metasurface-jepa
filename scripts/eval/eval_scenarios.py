@@ -122,21 +122,25 @@ def evaluate_scenario(model, surrogate, occ, sv, spec, mask, scalar_known,
 
     Fix 7: uses the exact model signature
         model(occupancy, scalar_values, scalar_known, spectrum, mask, ...)
-    Fix 14: scalar MAE reported separately for known (0 by construction) and
-    unknown positions; occupancy metrics split by masked/visible region.
+    Fix 14: scalar MAE reported separately for known and unknown positions
+    (the known-position value is the head's raw prediction error — known values
+    are substituted only later at assembly, not in scalar_pred); occupancy
+    metrics split by masked/visible region.
     Fix 4 (scientific deployment): the SPECTRUM metric measures the geometry
     that would actually be deployed — occupancy logits hard-thresholded to
-    binary via hard_forward=True, then MetaDiT assembly → surrogate. The soft
-    sigmoid occupancy is used ONLY for the occupancy IoU/F1 diagnostic (it
-    measures the model's raw occupancy quality), never for the scientific
-    spectrum error.
+    binary via hard_forward=True with visible pixels retained, then MetaDiT
+    assembly → surrogate.
+    Audit B7: the occupancy IoU/F1/fraction diagnostics are computed on the
+    model's RAW sigmoid occupancy (decode_occupancy_prob) — the retained/hard
+    occupancy would make visible-region IoU identically 1.0 and hide the
+    model's true occupancy quality.
     """
     model.eval()
     surrogate.eval()
 
     out = model(occ, sv, scalar_known, spec, mask, goal_mode="real")
     # Deployed (binary) geometry for the scientific spectrum metric.
-    geometry, soft_occ = model.decode_geometry(
+    geometry, _ = model.decode_geometry(
         out["z_hat"], out["scalar_pred"],
         occ_input=occ, mask=mask, use_ste=False,
         scalar_known=scalar_known, scalar_values=sv,
@@ -153,7 +157,11 @@ def evaluate_scenario(model, surrogate, occ, sv, spec, mask, scalar_known,
     scalar_mae_known = float(
         (out["scalar_pred"] - sv)[known].abs().mean().item()) if known.any() else 0.0
 
-    occ_metrics = _occupancy_metrics(soft_occ, occ, mask=mask)
+    # Occupancy quality on the RAW sigmoid probability (audit B7).
+    raw_prob = model.decode_occupancy_prob(
+        out["z_hat"], out["scalar_pred"],
+        scalar_known=scalar_known, scalar_values=sv)
+    occ_metrics = _occupancy_metrics(raw_prob, occ, mask=mask)
 
     return {
         "scenario": scenario_name,
