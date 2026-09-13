@@ -407,6 +407,26 @@ _SURROGATE_PATH = os.path.join(
 _HAS_SURROGATE = os.path.exists(_SURROGATE_PATH)
 
 
+def test_load_surrogate_rejects_unloadable_checkpoints(tmp_path):
+    """Audit B9: an unloadable surrogate checkpoint must raise.
+
+    The old loader silently skipped loading when the checkpoint was not a plain
+    dict or contained a "prediction" key, leaving a RANDOM-initialized surrogate
+    — every physics loss would have been meaningless with no warning.
+    """
+    from physics.physics_loop import load_surrogate
+
+    bad_dict = tmp_path / "bad_surrogate.bin"
+    torch.save({"prediction": torch.zeros(1), "other": 1}, str(bad_dict))
+    with pytest.raises(RuntimeError, match="surrogate checkpoint"):
+        load_surrogate(str(bad_dict), device="cpu")
+
+    not_a_dict = tmp_path / "not_a_dict.bin"
+    torch.save(torch.zeros(3), str(not_a_dict))
+    with pytest.raises(RuntimeError, match="surrogate checkpoint"):
+        load_surrogate(str(not_a_dict), device="cpu")
+
+
 @pytest.mark.skipif(not _HAS_SURROGATE,
                     reason="Surrogate weights not available")
 def test_physics_loss_finite():

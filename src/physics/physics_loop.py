@@ -38,13 +38,36 @@ def load_surrogate(path, device="cpu"):
     Parameters are frozen; eval mode; autograd flows through the input.
 
     Per Phase 4 MD §4: frozen params, eval mode, but NOT no_grad on input.
+
+    Checkpoint formats (mirrors external/metadit/metric.py, which does
+    `model.load_state_dict(torch.load(path), strict=True)`):
+      - a raw state dict (the released format), or
+      - a dict wrapping one under "state_dict" / "model".
+
+    Audit B9: anything else raises. The previous implementation silently
+    skipped loading when the checkpoint was not a plain dict (or happened to
+    contain a "prediction" key) and returned a RANDOM-initialized surrogate —
+    every physics loss would have been meaningless with no warning.
     """
     from model.surrogate import surrogate_s3
     m = surrogate_s3()
     ckpt = torch.load(path, map_location="cpu")
-    if isinstance(ckpt, dict) and "prediction" not in ckpt:
-        # Could be a raw state_dict or a checkpoint dict
-        m.load_state_dict(ckpt, strict=True)
+    if isinstance(ckpt, dict):
+        sd = ckpt.get("state_dict", ckpt.get("model", ckpt))
+    else:
+        sd = None
+    if not isinstance(sd, dict) or not sd:
+        raise RuntimeError(
+            f"surrogate checkpoint {path!r} is not a usable state dict "
+            f"(got {type(ckpt).__name__}); refusing to continue with a "
+            "randomly initialized surrogate — every physics loss would be "
+            "meaningless (audit B9)")
+    try:
+        m.load_state_dict(sd, strict=True)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"surrogate checkpoint {path!r} does not match the MetaDiT "
+            f"surrogate architecture (strict load failed): {e}") from e
     m.eval().to(device)
     for p in m.parameters():
         p.requires_grad_(False)
