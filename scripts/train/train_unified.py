@@ -115,6 +115,24 @@ def _validate_config(cfg):
             f"staging.phase={staging_phase!r} expects physics but "
             "loss.lambda_phys = 0 — the physics loss stays inactive")
 
+    # Audit B24: lambda_phys > 0 with STE disabled is a SILENT NO-OP. Measured
+    # on the released surrogate (2026-09-13 probe): the soft-occupancy path
+    # computes a perfectly healthy-looking L_phys (18.58) while ZERO student
+    # parameters receive gradient — the soft field is ~96% out of distribution
+    # for the surrogate (spectrum_rel_diff = 0.9599). Nothing else in the
+    # pipeline refuses this combination, and the failure is invisible in the
+    # loss logs, so the config must be rejected rather than warned about.
+    physics_use_ste = cfg.get("staging", {}).get("physics_use_ste", True)
+    if lambda_phys > 0 and not bool(physics_use_ste):
+        raise ValueError(
+            f"loss.lambda_phys={lambda_phys} > 0 with "
+            "staging.physics_use_ste=false: the soft-occupancy path is a silent "
+            "dead end — the physics loss would log a healthy value while "
+            "contributing ZERO gradient to the model (measured against the "
+            "released surrogate: 0 student params with grad, soft field 96% out "
+            "of distribution). Set physics_use_ste: true, or keep lambda_phys=0 "
+            "and rely on L_occ for decoder supervision.")
+
     for w in warnings:
         print(f"[config] WARNING: {w}")
     return warnings
@@ -1247,6 +1265,35 @@ def preflight(cfg, device=None):
     if surrogate_grads != 0 or ema_grads != 0 or scalar_ema_grads != 0 or released_grads != 0:
         raise RuntimeError(
             f"preflight: frozen params received gradients: {ownership}")
+
+    # Physics-alive check (audit B24). The ownership counts above come from the
+    # FULL objective, so L_inv/L_var/L_cov/L_occ also satisfy them — a physics
+    # path with a dead Jacobian would pass unnoticed. Measured on the released
+    # surrogate: the soft-occupancy path computes a healthy-looking L_phys
+    # (18.58) while ZERO student parameters receive gradient. So assert the
+    # physics term ALONE reaches the student. The ownership counts are already
+    # in locals, so resetting grads here cannot corrupt them.
+    from physics.physics_loop import physics_loss_from_out
+
+    physics_use_ste = bool(cfg.get("staging", {}).get("physics_use_ste", True))
+    model.zero_grad(set_to_none=True)
+    L_phys_only, _, _ = physics_loss_from_out(
+        model, out, surrogate, occ, sv, sk, spec, M,
+        loss_type="smooth_l1", use_ste=physics_use_ste, normalize=True)
+    physics_grads = sum(
+        1 for p in model.parameters()
+        if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0)
+    model.zero_grad(set_to_none=True)
+    if physics_grads == 0:
+        raise RuntimeError(
+            "preflight: the physics term produced NO student gradient "
+            f"(L_phys={float(L_phys_only.detach()):.4f}, "
+            f"physics_use_ste={physics_use_ste}). This is the silent-no-op "
+            "failure mode (audit B22/B24): the loss looks healthy while the "
+            "frozen surrogate contributes nothing to training. With "
+            "physics_use_ste=False the soft occupancy field is ~96% out of "
+            "distribution for the surrogate and every gradient is zero.")
+    checks["physics_term_student_params_with_grad"] = physics_grads
 
     return {"checks": checks, "gradient_ownership": ownership,
             "loss": float(loss.detach())}

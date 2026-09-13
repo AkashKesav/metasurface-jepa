@@ -35,6 +35,37 @@ _HAS_REAL_RUN_ASSETS = all(
 )
 
 
+def test_config_rejects_physics_without_ste():
+    """Audit B24: lambda_phys > 0 together with physics_use_ste=false is a SILENT
+    NO-OP. Measured against the released surrogate (2026-09-13 probe): the
+    soft-occupancy path computes a healthy-looking L_phys (18.58) while ZERO
+    student parameters receive gradient, because the soft field is ~96% out of
+    distribution for the surrogate (spectrum_rel_diff = 0.9599). The combination
+    must be rejected rather than warned about — the failure is invisible in the
+    loss logs.
+    """
+    from train_unified import _validate_config
+
+    cfg = _load_cfg()
+    cfg["staging"]["phase"] = "C"
+    cfg["staging"]["physics_use_ste"] = False
+    cfg["loss"]["lambda_phys"] = 0.1
+    with pytest.raises(ValueError, match="physics_use_ste"):
+        _validate_config(cfg)
+
+
+def test_config_allows_physics_with_ste():
+    """The STE path is the one the probe measured working (360 student params
+    with gradient), so the config must remain valid."""
+    from train_unified import _validate_config
+
+    cfg = _load_cfg()
+    cfg["staging"]["phase"] = "C"
+    cfg["staging"]["physics_use_ste"] = True
+    cfg["loss"]["lambda_phys"] = 0.1
+    _validate_config(cfg)  # must not raise
+
+
 def test_real_mode_missing_data_raises():
     """Fix 5: real training with a missing dataset split must raise, never
     silently fall back to synthetic data."""
