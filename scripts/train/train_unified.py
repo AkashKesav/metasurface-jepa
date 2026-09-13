@@ -48,7 +48,9 @@ from physics.physics_loop import load_surrogate, physics_loss
 from losses.unified_losses import UnifiedJEPALoss
 from runtime.reproducibility import set_seed, collect_rng_state, restore_rng_state
 from runtime.device import resolve_device
-from train.engine import save_checkpoint, load_checkpoint, collect_ema_state
+from train.engine import (
+    collect_ema_state, load_checkpoint, restore_ema_state, save_checkpoint,
+)
 
 
 def _ensure_spectrum_weights(path, device, allow_dummy=False):
@@ -669,6 +671,19 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         # from seed).
         restore_scalar_masker_bank_state(
             scalar_masker_bank, ckpt.get("scalar_masker_rng_state", {}))
+        # Audit B3: restore the saved EMA state (momentum counters + targets)
+        # from the checkpoint rather than relying on incidental state-dict
+        # coverage. This run's schedule length is then re-applied (B2) so the
+        # EMA ramp matches the LR cosine schedule rebuilt from config; a change
+        # in schedule length is reported loudly rather than silently applied.
+        restore_ema_state(model, ckpt.get("ema_state"))
+        ckpt_total = (ckpt.get("ema_state") or {}).get("total_steps")
+        model.set_total_steps(total_steps)
+        if ckpt_total is not None and int(ckpt_total) != int(total_steps):
+            print(f"[resume] NOTE: EMA schedule length changed: checkpoint "
+                  f"{int(ckpt_total)} -> this run {int(total_steps)} steps; "
+                  "the EMA ramp follows THIS run's schedule (matching the LR "
+                  "cosine schedule rebuilt from config).")
         print(f"Resumed at step {start_step}")
 
     # --- no-train smoke ---
