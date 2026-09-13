@@ -367,7 +367,73 @@ is established yet.
 
 ---
 
-## 8. EMA and pipeline wiring audit, 2026-09-13
+## 9. Long run (20,000 steps) — the learning verdict, 2026-09-13
+
+Run to separate "too few steps" from "structurally not learning": **identical config, no changes
+except `--max-steps 20000`** (13× the previous run). Kernel
+`anosvol/metasurface-jepa-192d-long-run` (v5), commit `0b69b23`, all stages `exit=0`
+(preflight 26 s, **20,000 steps in 1846 s**, eval 16 s, EMA probe 3 s).
+
+### 9.1 The EMA is working — the earlier suspicion is retired
+
+Measured directly (nothing in the pipeline did this before): relative L2 distance between each EMA
+target and its student at step 19,999.
+
+| pair | tensors | rel. distance (mean) | min / max |
+|---|---|---|---|
+| `ema` (occupancy encoder) | 74 | **0.0009** | 0.0000 / 0.0063 |
+| `scalar_mlp_ema` (scalar encoder) | 18 | **0.0013** | 0.0000 / 0.0037 |
+
+Both track to within ~0.1 %. So the `raw_cos_err`/norm-gap observations were *not* a drifting
+target; the targets are fine. §8.2 item 4 is closed.
+
+### 9.2 It IS learning — but it plateaus at ~5,000 steps, and the hard gate still fails
+
+Improvements over 20k steps (validation trajectory, 399 validations):
+
+| | step 50 | step ~5,000 | step 19,999 |
+|---|---|---|---|
+| `raw_mse` (easy) | 6.147 | 4.721 | 4.731 |
+| `raw_cos_err` (easy) | 1.0000 | 0.9587 | 0.8588 |
+| `proj_mse` (= `L_inv`, easy) | 1.420 | 4.227 | 4.153 |
+| `proj_cos_err` (hard) | 0.7732 | 0.7397 | 0.7938 |
+| `L_cov` (hard) | 15.08 | 174.00 | 160.30 |
+
+**Every quantity plateaus by ~step 5,000 and then does not move for another 15,000 steps.** So the
+1500-step result was not merely undertrained — a 13× longer schedule buys nothing after the first
+third.
+
+Real progress *did* happen, which the 1500-step run could not show:
+
+- **The decoder is no longer collapsed to the mean.** `collapse_check` predicted occupancy fraction
+  `0.3817 ± 0.1288` against a true `0.3989` (was `0.5012 ± 0.0066`). It now varies per sample.
+- **Scenario B gate: PASS** — real `0.0935` vs shuffled `0.3330` (+0.2396).
+- **Scenario C gate: PASS** — real `0.1388` vs shuffled `0.3609` (+0.2220).
+- **Scalar dependence (one known): PASS** — `0.216466` vs `0.218410`.
+
+**But the gate that matters still fails.** Scenario A (hard stratum: full occupancy mask + all
+scalars unknown): real `0.2046` vs shuffled `0.1889` → **−0.0157, gate false** — the true spectrum
+is *slightly worse* than a deranged one.
+
+### 9.3 The CFG sweep localises the failure (new measurement)
+
+`cfg_guidance_sweep_A` (audit B26 wired this in; it had no caller before):
+
+| w | 0.0 (pure null) | 0.5 | 1.0 (plain real) | 2.0 | 3.0 | 5.0 |
+|---|---|---|---|---|---|---|
+| spectrum error | 0.7302 | 0.3826 | **0.2046** | 8.6815 | 9.5531 | 9.3941 |
+
+Reading: removing the goal entirely costs a lot (`w=0` → 0.7302 vs `w=1` → 0.2046), so the model
+*is* using the conditioning. But the real-vs-shuffled gap is ~0, so what it uses is the **presence
+of a goal, not its content**. Extrapolating past `w=1` diverges catastrophically (8.7–9.6), i.e.
+the real/null difference is not a meaningful direction to amplify. `w=1` — no guidance at all — is
+optimal, so the CFG machinery adds nothing here as trained.
+
+This is a sharper statement of the failure than "the gate is red": the spectrum conditions the
+model as a mode switch, not as a target to fit. It also means the projector-absorption hypothesis
+(§7.3) is only *part* of the story — the representation improved and the decoder un-collapsed, so
+absorption is not total.
+
 
 Requested alongside the physics audit. Source read directly; the two claims marked *(spot-checked)*
 were re-verified by me independently of the agent report that produced them.
