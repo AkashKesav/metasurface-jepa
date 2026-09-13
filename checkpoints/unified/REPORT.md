@@ -337,7 +337,7 @@ Run before enabling `lambda_phys`, because the spec makes several checks precond
    step against the real splits, which the dev machine cannot load. If any real sample trips it,
    the run dies mid-training. Cheap to measure on the cloud before committing to a long run.
 
-### 7.3 What the negative result most plausibly means (hypothesis, not conclusion)
+### 7.4 What the negative result most plausibly means (hypothesis, not conclusion)
 
 The predictor *is* goal-sensitive — validation's guidance gap on the hard stratum was 2.47 → 3.06
 (normalized) and non-zero. But the **decode** is not: scenario A's real-vs-shuffled errors differ
@@ -348,3 +348,101 @@ permits (with only BCE supervision, the mean occupancy is a competitive solution
 the physics term is supposed to break. It is also consistent with plain under-training (~2 % of an
 epoch). Both readings predict that activating physics is the informative next experiment; neither
 is established yet.
+
+---
+
+## 8. EMA and pipeline wiring audit, 2026-09-13
+
+Requested alongside the physics audit. Source read directly; the two claims marked *(spot-checked)*
+were re-verified by me independently of the agent report that produced them.
+
+### 8.1 EMA — correct
+
+1. **Construction.** `EMAEncoder.__init__` deep-copies the source encoder and sets
+   `requires_grad_(False)` on every target parameter (`target_encoder.py:17-19`), and
+   `UnifiedJEPA.__init__` asserts none is trainable (`assembly.py:214-217`). Both targets
+   (`ema` ← `occupancy_encoder`, `scalar_mlp_ema` ← `scalar_encoder`) are built this way
+   (`assembly.py:194-205`).
+2. **Seeding.** `build_unified_model` explicitly initialises both targets from their students
+   (`assembly.py:533-534`) — the 384-D checkpoints are deliberately *not* loaded.
+3. **Update maths.** `p_t.lerp_(p_s, 1 - m)` is exactly `m·p_t + (1-m)·p_s`, under
+   `@torch.no_grad()` (`target_encoder.py:31-35`) — no gradient can reach the target.
+4. **Cadence.** `objective.on_optimizer_step(model, step)` (`train_unified.py:938`) runs *after*
+   `optimizer.step()`/`scheduler.step()` (`:936-937`) and updates **both** targets
+   (`unified_losses.py:266-269`) — correct EMA semantics (target follows the updated student).
+5. **Schedule.** `current_momentum(step) = start + (end-start)·min(1, step/total_steps)`, with
+   `set_total_steps` called from the trainer (audit B2). The 0-based loop step is passed, so the
+   first update uses m = 0.996 exactly. Recomputed from `step`, so it is resume-consistent.
+6. **Target path isolation.** The target forward is inside `with torch.no_grad():`
+   (`assembly.py:335`), so `z_y_raw` carries no `grad_fn`; the objective's projector still receives
+   gradient from the `p_y` branch because the *projector* is a separate learnable module — the
+   canonical VICReg topology, as documented at `unified_losses.py:96-104`.
+7. **Target-side FiLM.** `scalar_mlp_ema` is fed the all-known 6-dim true-scalar input
+   (`assembly.py:337-342`) — conditioning only, never decoded, never a loss target (§3.6).
+8. **Freeze enforcement.** `enforce_frozen_reference_modes()` pins both targets and the released
+   encoder to `eval()`, and is called from `train()` **and** at the top of every `forward()`
+   (`assembly.py:225-236, 269`).
+9. **Round trip.** `collect_ema_state`/`restore_ema_state` carry momentum endpoints, `total_steps`
+   and both target weight sets, with a loud warning when a legacy checkpoint has no `target`
+   (`engine.py:146-218`); the trainer restores them on resume (audit B3).
+10. **Per-step guard.** `_assert_no_ema_gradients` checks `ema`, `scalar_mlp_ema`, the released
+    encoder and the surrogate every step (`train_unified.py:347-372`, called `:853, :934`).
+    *(Empirically confirmed on the cloud run: preflight reported `ema_params_with_grad: 0`,
+    `scalar_mlp_ema_params_with_grad: 0`, `released_params_with_grad: 0`, `surrogate:
+    params_with_grad: 0` while 362 student params had gradients.)*
+
+### 8.2 EMA — issues (none currently breaking, all worth knowing)
+
+1. **The targets are saved twice.** `SAVED_EXCLUDES = (".released.",)` (`assembly.py:61`), so the
+   EMA targets (registered submodules) travel inside `ckpt["model"]` **and** again inside
+   `ema_state`. Restoring is likewise doubled (`load_into_model` + `restore_ema_state`). Redundant
+   but complete — the risk is the inverse of a gap: if one path were wrong the other would mask it,
+   so a divergence would be hard to notice.
+2. **`restore_ema_state` overrides the config's momentum endpoints.** It assigns
+   `ema.momentum_start/end` from the checkpoint (`engine.py:187-189`), and the trainer's resume
+   path re-applies only the *schedule length* (`total_steps`). Editing `ema_momentum_start/end` in
+   the YAML and then resuming therefore has **no effect** — the checkpoint wins. Correct for exact
+   resume, surprising for a deliberate schedule change.
+3. **`EMAEncoder.update` zips parameter iterators** (`target_encoder.py:34`). `zip` silently stops
+   at the shorter sequence, so any future structural divergence between target and student would
+   silently skip parameters rather than raise. Safe today (the target is a deep copy made at
+   construction), fragile by design.
+4. **Not verified empirically: that the target actually *tracks* the student.** Validation showed
+   `raw_cos_err = 1.0` (predicted and target latents orthogonal) with `raw_z_y_norm ≈ 30.3` against
+   `raw_z_hat_norm ≈ 9.2`. That is consistent with a genuinely lagging/diverged target as well as
+   with an undertrained student, and no artefact in the run measures target-vs-student distance.
+   **Cheap decisive check:** report ‖target − student‖ / ‖student‖ per encoder at the end of the
+   next run. Not yet done.
+
+### 8.3 Pipeline wiring — verdicts
+
+| Stage | Verdict | Key evidence |
+|---|---|---|
+| Data path (dataset → collate → factorize → masker → scalar masker → forward) | **wired** | `train_unified.py:657,770-771,788-789,905-907,443-445,423-424` |
+| Curriculum (mask ratio, scalar regime, goal dropout) + RNG round trip | **wired** | `train_unified.py:427,424,450-451,275-288`; `spectrum_encoder.py:104-110` |
+| Goal / CFG — null branch truly zeroes the conditioning | **wired** | `spectrum_encoder.py:104-110` (zeros, and skips the released encoder) |
+| Optimizer ownership (EMAs/released/surrogate out, projector in) | **wired** | `train_unified.py:714,721-728`; `assembly.py:54-55,214-217`; `physics_loop.py:72-73` |
+| Checkpoint round trip | **wired except `cfg`** | `engine.py:272-297,331-379`; `train_unified.py:805,809-816,966-991` |
+| LR schedule (warmup + cosine, driven by `total_steps`, stepped once per optimizer step) | **wired** | `train_unified.py:626,729-731,936-937,380-396` |
+| Validation (same factorization/masker conventions, per-stratum) | **wired** | `train_unified.py:461,492-503,522-528,782-792` |
+| Eval path (checkpoint → model + EMA, no objective needed) | **wired** | `eval_scenarios.py:37,518-527` |
+
+### 8.4 Pipeline wiring — not wired / half-wired
+
+1. **`cfg_forward` has no consumer.** *(spot-checked)* The function exists and is correct
+   (`guidance.py:57`, `cfg_combine = z_null + w·(z_real − z_null)` at `:31,102-103`), but a
+   repo-wide grep finds it **only at its definition** plus tests/docs — no call in `scripts/train/`,
+   `scripts/eval/` or `scripts/diagnostics/`. So training prepares the unconditional branch
+   (goal dropout + null steps) and then **nothing ever uses classifier-free guidance at
+   inference**; the guidance weight `w` is never exercised. The evaluator's real/null/shuffled
+   comparison does its own two-pass calls and does not combine them.
+2. **`ckpt["cfg"]` is saved but never read.** *(spot-checked)* `save_checkpoint` writes it
+   (`engine.py:280`) and the schema requires it, but no load path consumes it — resume always uses
+   the YAML passed via `--config`. Editing the config between save and resume therefore silently
+   diverges from what the checkpoint recorded. This is the only saved-but-not-restored state.
+3. **`ScalarMasker.sample`'s `masked_values` is discarded** — `sample_scalar_known` keeps only the
+   `known` flags (`train_unified.py:287-288`); value masking is re-derived inside
+   `model._build_scalar_input`. Correct result, dead output.
+4. **`validate` hardcodes `placement="random"`** (`train_unified.py:501-503,589-591`) regardless of
+   `cfg.curriculum.mask_placement`. With `half_sensitivity` configured, training and validation
+   would mask differently; currently both are `random`, so it is latent.
