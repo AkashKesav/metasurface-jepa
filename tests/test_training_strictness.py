@@ -66,6 +66,31 @@ def test_config_allows_physics_with_ste():
     _validate_config(cfg)  # must not raise
 
 
+def test_config_rejects_eval_samples_below_two():
+    """Audit B27: the evaluation batch IS the gate's sample size. Below 2 the
+    shuffled control has no valid derangement, and the historical value of 2
+    (inherited from train.batch_size) was too few to settle anything."""
+    from train_unified import _validate_config
+
+    cfg = _load_cfg()
+    cfg.setdefault("eval", {})["n_samples"] = 1
+    with pytest.raises(ValueError, match="eval\\.n_samples"):
+        _validate_config(cfg)
+
+
+def test_config_accepts_the_shipped_eval_samples():
+    """The shipped default must validate, and it must be independent of the
+    training batch size (which is 2)."""
+    from train_unified import _validate_config
+
+    cfg = _load_cfg()
+    assert cfg["eval"]["n_samples"] >= 2
+    assert cfg["eval"]["n_samples"] != cfg["train"]["batch_size"], (
+        "the evaluation sample size must not be the training batch size — that "
+        "is the defect audit B27 fixed")
+    _validate_config(cfg)
+
+
 def test_real_mode_missing_data_raises():
     """Fix 5: real training with a missing dataset split must raise, never
     silently fall back to synthetic data."""

@@ -107,10 +107,21 @@ def _occupancy_metrics(pred_occ, true_occ, mask=None):
     return out
 
 
-def _spectrum_error(pred_spec, target_spec):
-    """Normalized L1 spectrum error."""
+def _spectrum_error_per_sample(pred_spec, target_spec):
+    """Per-sample normalized L1 spectrum error, shape (B,) — audit B27.
+
+    The real-vs-shuffled gate is a PAIRED comparison over samples, so the batch
+    mean alone hides how many samples actually support it (and how variable the
+    difference is). With the historical evaluation batch of 2 the mean was the
+    only thing reported, and the gate was decided by a single swap.
+    """
     std = target_spec.std(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
-    return float(((pred_spec - target_spec) / std).abs().mean().item())
+    return ((pred_spec - target_spec) / std).abs().mean(dim=(-2, -1))
+
+
+def _spectrum_error(pred_spec, target_spec):
+    """Normalized L1 spectrum error (batch mean)."""
+    return float(_spectrum_error_per_sample(pred_spec, target_spec).mean().item())
 
 
 @torch.no_grad()
@@ -189,6 +200,7 @@ def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
     b = occ.shape[0]
 
     results = {}
+    per_sample = {}
     for mode in ("real", "null", "shuffled"):
         if mode == "shuffled":
             if b < 2:
@@ -208,13 +220,28 @@ def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
             scalar_known=scalar_known, scalar_values=sv, hard_forward=True)
         spectrum_pred = surrogate(geometry).prediction
         results[mode] = _spectrum_error(spectrum_pred, spec)
+        per_sample[mode] = _spectrum_error_per_sample(
+            spectrum_pred, spec).detach().cpu()
 
     results["gap"] = {}
     if results.get("shuffled") is not None:
+        # Audit B27: report the PAIRED per-sample statistics, not just the batch
+        # means. The gate is `real < shuffled` per scenario; with a small
+        # evaluation batch the means alone cannot distinguish a real effect from
+        # one swap, so the fraction of samples supporting the comparison and the
+        # spread of the paired difference are part of the result.
+        paired = per_sample["shuffled"] - per_sample["real"]
         results["gap"] = {
             "real_minus_null": results["null"] - results["real"],
             "real_minus_shuffled": results["shuffled"] - results["real"],
             "gate": results["real"] < results["shuffled"],
+            "n_samples": int(b),
+            "paired_diff_mean": float(paired.mean().item()),
+            "paired_diff_std": float(paired.std(unbiased=True).item()) if b > 1 else None,
+            "real_beats_shuffled_fraction": float(
+                (per_sample["real"] < per_sample["shuffled"]).float().mean().item()),
+            "per_sample_real": [float(v) for v in per_sample["real"]],
+            "per_sample_shuffled": [float(v) for v in per_sample["shuffled"]],
         }
     else:
         results["gap"] = {
@@ -389,9 +416,20 @@ def nearest_neighbor_baseline(val_spec, train_specs, train_occupancy,
     }
 
 
-def _load_val_batch(cfg, device, smoke):
-    """Authoritative real-data validation batch (Fix 7: real by default)."""
-    b = cfg["train"].get("batch_size", 2)
+def _load_val_batch(cfg, device, smoke, n_samples=None):
+    """Authoritative real-data validation batch (Fix 7: real by default).
+
+    Audit B27: the batch size is the GATE's sample size. It used to be
+    `cfg["train"]["batch_size"]` (2), so every real/null/shuffled comparison, the
+    shuffled control (a 2-item derangement = one swap), the scalar-dependence
+    checks and the whole guidance sweep were decided by TWO samples. The
+    training batch size is an optimisation choice and has no business setting the
+    evaluation's statistical power, so evaluation now has its own knob:
+    `eval.n_samples` in the config, overridable with `--samples`.
+    """
+    if n_samples is None:
+        n_samples = int(cfg.get("eval", {}).get("n_samples", 32))
+    b = max(2, int(n_samples))          # the shuffled control needs B >= 2
     if smoke:
         return _make_synthetic_batch(b, device)
     from data.dataset import MetaDiTDataset, collate_batch
@@ -401,7 +439,7 @@ def _load_val_batch(cfg, device, smoke):
         raise RuntimeError(
             f"real validation split missing: {val_path}. Evaluation in real "
             "mode requires the real dataset; use --smoke for synthetic only.")
-    ds = MetaDiTDataset(val_path, max_samples=b * 2, seed=42)
+    ds = MetaDiTDataset(val_path, max_samples=b, seed=42)
     loader = DataLoader(ds, batch_size=b, shuffle=False, num_workers=0,
                         collate_fn=collate_batch)
     G, S = next(iter(loader))
@@ -468,16 +506,23 @@ def _collapse_metrics(model, occ, sv, spec, mask, scalar_known, device):
     }
 
 
-def run_all_scenarios(cfg, ckpt_path, device, smoke=False):
-    """Run all scenarios + diagnostics on the real validation split."""
-    model, surrogate = _load_eval(cfg, ckpt_path, device)
-    b = cfg["train"].get("batch_size", 2)
+def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
+    """Run all scenarios + diagnostics on the real validation split.
 
-    occ, sv, spec = _load_val_batch(cfg, device, smoke)
-    if occ.shape[0] < 2:
-        # Shuffled controls need B >= 2; pad by reloading a larger batch.
+    Audit B27: `n_samples` sets the evaluation batch for every comparison below —
+    the scenario metrics, the real/null/shuffled gates, the shuffled control, the
+    scalar-dependence checks and the guidance sweep. It defaults to
+    `eval.n_samples` (32); it is deliberately independent of
+    `train.batch_size`.
+    """
+    model, surrogate = _load_eval(cfg, ckpt_path, device)
+
+    occ, sv, spec = _load_val_batch(cfg, device, smoke, n_samples=n_samples)
+    b = occ.shape[0]
+    if b < 2:
         raise RuntimeError("validation batch must have >= 2 samples for "
                            "shuffled-spectrum controls")
+
 
     masker = BlockMasker(placement="random", grid=16, min_side=3,
                          k_range=(1, 4), seed=999)
@@ -586,6 +631,13 @@ def main():
     parser.add_argument("--scenario", type=str, default="all",
                         choices=["A", "B", "C", "all"])
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--samples", type=int, default=None,
+                        help="Evaluation batch size = the gate's sample size and "
+                             "the sensitivity of EVERY comparison it reports "
+                             "(audit B27). Defaults to eval.n_samples in the "
+                             "config (32); must be >= 2 for the shuffled "
+                             "control.")
+
     parser.add_argument("--smoke", action="store_true",
                         help="Explicit smoke mode: synthetic data allowed. "
                              "Never used for scientific evaluation.")
@@ -595,7 +647,7 @@ def main():
         cfg = yaml.safe_load(f)
 
     results = run_all_scenarios(cfg, args.checkpoint, args.device,
-                                smoke=args.smoke)
+                                smoke=args.smoke, n_samples=args.samples)
     print(json.dumps(results, indent=2, default=float))
 
 

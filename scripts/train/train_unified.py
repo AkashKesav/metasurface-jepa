@@ -63,7 +63,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "scalar_convention", "hidden", "num_heads", "geo_depth", "predictor_depth",
     "goal_tokens", "num_predictor_heads", "scalar_hidden", "n_film_blocks",
     "spec_dim", "ema_momentum_start", "ema_momentum_end", "loss", "curriculum",
-    "staging", "weights", "data", "train", "_architecture_id",
+    "staging", "weights", "data", "eval", "train", "_architecture_id",
 })
 
 
@@ -132,6 +132,16 @@ def _validate_config(cfg):
             "released surrogate: 0 student params with grad, soft field 96% out "
             "of distribution). Set physics_use_ste: true, or keep lambda_phys=0 "
             "and rely on L_occ for decoder supervision.")
+
+    # Audit B27: the evaluation batch IS the gate's sample size. The shuffled
+    # control needs >= 2 for a valid derangement, and the historical value of 2
+    # (inherited from train.batch_size) was too few to distinguish a real effect
+    # from a single swap.
+    n_eval = cfg.get("eval", {}).get("n_samples", 32)
+    if int(n_eval) < 2:
+        raise ValueError(
+            f"eval.n_samples={n_eval} < 2: the real-vs-shuffled gate needs at "
+            "least two samples for a valid derangement (audit B27)")
 
     for w in warnings:
         print(f"[config] WARNING: {w}")

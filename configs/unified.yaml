@@ -108,6 +108,15 @@ data:
   # Synthetic mode is CLI-only (--use-synthetic-smoke); there is deliberately
   # no config key for it (audit B17).
 
+# Evaluation — scripts/eval/eval_scenarios.py, overridable with --samples.
+# Audit B27: the evaluation batch IS the gate's sample size. It used to be
+# train.batch_size (2), so every real/null/shuffled comparison, the shuffled
+# control (a 2-item derangement = one swap), the scalar-dependence checks and the
+# whole guidance sweep were decided by TWO samples. A training batch size is an
+# optimisation choice and must not set the evaluation's statistical power.
+eval:
+  n_samples: 32
+
 train:
   batch_size: 2
   grad_accum: 1

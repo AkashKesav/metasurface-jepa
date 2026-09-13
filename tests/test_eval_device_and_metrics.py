@@ -389,6 +389,43 @@ def test_cfg_guidance_sweep_exercises_cfg_forward():
     assert model.training is True, "cfg_forward must restore the caller's mode"
 
 
+def test_real_null_shuffled_reports_per_sample_statistics():
+    """Audit B27: the gate is a PAIRED comparison over samples, so the batch
+    means alone are not a result. The evaluator used to inherit its batch size
+    from `train.batch_size` (2), which made a gate decided by a single swap look
+    identical to one decided by 32 samples. It must now report the sample size,
+    the fraction of samples where real beats shuffled, and the spread of the
+    paired difference.
+    """
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts", "eval"))
+    from eval_scenarios import real_null_shuffled
+
+    model = _build_model()
+    surrogate = _StubSurrogate()
+    b = 6
+    torch.manual_seed(5)
+    occ = (torch.rand(b, 1, 64, 64) > 0.5).float()
+    sv = torch.rand(b, 3) * 2 + 1
+    spec = torch.rand(b, 2, 301)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=9).sample(occ, 1.0)
+    sk = torch.zeros(b, 3, dtype=torch.bool)
+
+    res = real_null_shuffled(model, surrogate, occ, sv, spec, M, "cpu",
+                             scalar_known=sk, seed=7)
+    gap = res["gap"]
+    assert gap["n_samples"] == b
+    assert len(gap["per_sample_real"]) == b
+    assert len(gap["per_sample_shuffled"]) == b
+    assert 0.0 <= gap["real_beats_shuffled_fraction"] <= 1.0
+    assert gap["paired_diff_std"] is not None
+    # the reported gate stays exactly the declared criterion
+    assert gap["gate"] == (res["real"] < res["shuffled"])
+    # the paired mean must equal the difference of the batch means
+    assert abs(gap["paired_diff_mean"]
+               - (res["shuffled"] - res["real"])) < 1e-6
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
