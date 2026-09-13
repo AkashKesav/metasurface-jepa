@@ -81,17 +81,42 @@ def test_guidance_gap_nonnegative():
     assert result["normalized_guidance_gap"] >= 0
 
 
-def test_guidance_gap_sweep_returns_all_ratios():
+def test_guidance_gap_sweep_returns_all_ratios_and_strata():
+    """Audit B14: the sweep must cover every ratio AND both scalar strata —
+    the all-unknown stratum is the one where spectrum dependence is the gate."""
     from diagnostics.guidance_gap import guidance_gap_sweep
     model = _build_model()
     occ, sv, spec, sk, _, masker = _test_data()
     ratios = [0.2, 0.4, 0.6, 0.8, 1.0]
     results = guidance_gap_sweep(model, occ, sv, spec, masker, ratios)
-    assert len(results) == len(ratios)
-    for r in ratios:
-        assert r in results
-        assert isinstance(results[r], float)
-        assert results[r] >= 0
+    assert set(results) == {"all_known", "all_unknown"}, sorted(results)
+    for stratum, curve in results.items():
+        assert len(curve) == len(ratios), (stratum, curve)
+        for r in ratios:
+            assert r in curve, (stratum, r)
+            assert isinstance(curve[r], float)
+            assert curve[r] >= 0
+
+
+def test_normalized_gap_uses_per_sample_l2_definition():
+    """Audit B14: normalized gap must equal the §20.3 form computed by hand —
+    mean_i ||z_real_i - z_null_i||_2 / std_i(z_real), per sample, not a
+    mean-absolute difference divided by a global std."""
+    from diagnostics.guidance_gap import compute_guidance_gap
+    model = _build_model()
+    occ, sv, spec, sk, M, _ = _test_data()
+    info = compute_guidance_gap(model, occ, sv, sk, spec, M)
+    with torch.no_grad():
+        z_real = model(occ, sv, sk, spec, M,
+                       goal_mode="real", with_target=False)["z_hat"]
+        z_null = model(occ, sv, sk, spec, M,
+                       goal_mode="null", with_target=False)["z_hat"]
+    gap = (z_real - z_null).flatten(1).norm(dim=1)
+    std = z_real.flatten(1).std(dim=1, unbiased=False)
+    expected_norm = (gap / std.clamp(min=1e-6)).mean().item()
+    assert abs(info["guidance_gap"] - gap.mean().item()) < 1e-6
+    assert abs(info["normalized_guidance_gap"] - expected_norm) < 1e-6
+    assert "gap_form" in info
 
 
 def test_guidance_gap_does_not_mutate_model_mode():

@@ -1,13 +1,15 @@
 """Classifier-free goal guidance (architecture_v5.md §3.5.1, Phase 4 MD §3.5.1).
 
-During training: replace A_goal with learned null token A_∅ with probability
-~10% (goal dropout). At inference: combine
+During training: replace the goal conditioning with the null conditioning
+(zeros) with probability ~10% (goal dropout — SpectrumPath returns zero
+c_physics/a_goal in "null" mode, so there is no separate learned null token).
+At inference: combine
 
     Z_guided = P(Z_x, A_∅) + w · [P(Z_x, A_goal) − P(Z_x, A_∅)]
 
 The model's forward already supports goal_mode in {"real", "null", "shuffled"}
 via spectrum_path. This module provides the CFG combine logic and the
-guidance-gap diagnostic (§20.3).
+guidance-gap diagnostic (§20.3, shared per-sample-L2 definition — audit B14).
 """
 
 import torch
@@ -99,15 +101,11 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
     q_guided = cfg_combine(q_real, q_null, w)
     scalar_guided = model.scalar_decoder(q_guided)
 
-    # Guidance gap: ||z_real - z_null|| / sigma(z_real)
-    diff = (z_real - z_null)
-    gap = diff.abs().mean().item()
-    std_real = z_real.std().item()
-    norm_gap = gap / max(std_real, 1e-6)
-
-    # Scalar-branch gap.
-    q_diff = (q_real - q_null).abs().mean().item()
-    q_std = q_real.std().item()
+    # Guidance gap: shared per-sample-L2 definition (audit B14) — the same
+    # helper the §20.3 diagnostic uses, so the two cannot diverge.
+    from diagnostics.guidance_gap import normalized_gap_stats
+    z_stats = normalized_gap_stats(z_real, z_null)
+    q_stats = normalized_gap_stats(q_real, q_null)
 
     info = {
         "z_hat_real": z_real,
@@ -115,9 +113,9 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
         "q_real": q_real,
         "q_null": q_null,
         "scalar_pred": scalar_guided,
-        "guidance_gap": gap,
-        "normalized_guidance_gap": norm_gap,
-        "scalar_guidance_gap": q_diff,
-        "normalized_scalar_guidance_gap": q_diff / max(q_std, 1e-6),
+        "guidance_gap": z_stats["guidance_gap"],
+        "normalized_guidance_gap": z_stats["normalized_guidance_gap"],
+        "scalar_guidance_gap": q_stats["guidance_gap"],
+        "normalized_scalar_guidance_gap": q_stats["normalized_guidance_gap"],
     }
     return z_guided, scalar_guided, info

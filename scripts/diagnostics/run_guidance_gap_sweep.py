@@ -76,13 +76,16 @@ def main():
                                   device=device)
 
     print("\n=== Guidance Gap Sweep (§20.3) ===")
-    for ratio in sorted(results.keys()):
-        print(f"  mask {ratio:.0%}: normalized_gap = {results[ratio]:.6f}")
+    for stratum, curve in results.items():
+        for ratio in sorted(curve.keys()):
+            print(f"  [{stratum:>11}] mask {ratio:.0%}: "
+                  f"normalized_gap = {curve[ratio]:.6f}")
 
     print(f"\n{json.dumps(results, indent=2)}")
     print("\nInterpretation:")
     print("  - Gap should increase with mask ratio")
-    print("  - Flat/near-zero gap (especially at high mask) = Failure Mode 2")
+    print("  - The all-unknown stratum (full mask + no scalars) is the gate;")
+    print("    a flat/near-zero gap there = Failure Mode 2")
 
 
 if __name__ == "__main__":
