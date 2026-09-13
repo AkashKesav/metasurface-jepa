@@ -4,6 +4,7 @@
 
 # Scalar convention (Phase 1 MD §3: store the verified convention in config/
 # checkpoint metadata — do not re-derive or normalize scalars twice).
+# Network input stays RAW/unscaled — operator decision 2026-09-13 (AUDIT_REPORT_192D §4).
 scalar_convention:
   parameter_order: ["l_lattice", "h_atom", "r_atom"]
   parameter_index_in_dataset: [0, 1, 2]

@@ -101,27 +101,28 @@ against the released MetaDiT convention (`external/metadit/datapipe.py`, `model/
 2. **Raw scalars are never standardised** anywhere before learning: `r ≈ 4.25` is ≈ 5.7× `h ≈ 0.75`
    and enters the scalar trunk, the encoder FiLM heads, and the decoder FiLM raw (the `r/5`, `l/3`
    rescaling happens only at the surrogate boundary, after all learning). This is a conditioning
-   risk, not an arithmetic error. **Operator decision** (below) — a per-scalar standardisation
-   with dataset statistics would be the remedy.
+   risk, not an arithmetic error. **Decided 2026-09-13: keep raw** (§4) — per-scalar
+   standardisation was considered and declined.
 3. **Zero placeholders for unknown scalars** (`value = 0, flag = 1/0`) sit outside the physical
    ranges; the flag carries missingness, so it is learnable, but it is a discontinuity rather than
    a smooth missing-value encoding. Observation only.
 
-### 3.3 Spec-vs-code divergences (flagged, not silently "fixed")
+### 3.3 Spec-vs-code divergences (flagged; the 2026-09-13 resolutions are marked inline)
 
 1. **Occupancy BCE**: `architecture_v5.md` §4.1 specifies `BCEWithLogits(logits, true_occupancy)`
    for the occupancy decoder. The shipped objective (`03_training_and_objective.md` lineage) has
    **no occupancy reconstruction term**: the decoder is supervised *only* by `L_phys`, so at the
    config default `lambda_phys = 0` (staging B) the occupancy decoder receives **no gradient at
-   all** until the physics stage. Either add a config-weighted BCE term or document physics-only
-   supervision as intentional. **Operator decision.**
+   all** until the physics stage. **Resolved 2026-09-13: the BCE term is implemented** (§4,
+   `1c53f90`) — the decoder is supervised on masked pixels from step 0.
 2. **Null-goal convention**: MetaDiT's own CFG feeds a constant `0.5`-filled spectrum *through* the
    encoder; this repo zeroes the conditioning (`c_physics`/`a_goal = 0`) and skips the frozen
    encoder on null steps (audit B5). Internally consistent; note for any MetaDiT comparison.
 3. **Mask ratio semantics**: the requested curriculum ratio is nominal — block masking does not
    achieve it (min-side clamps inflate blocks, independent placement overlaps them; measured, and
-   now logged per bucket as `mask_fraction_achieved_mean`). Decide whether to calibrate the masker
-   or keep ratios as nominal buckets. **Operator decision.**
+   now logged per bucket as `mask_fraction_achieved_mean`). **Resolved 2026-09-13: the
+   random-placement masker is calibrated** (§4, `67beea5`); `sensitivity_masks` remains nominal
+   (documented; its achieved coverage is logged the same way).
 4. **Evaluator diversity** does not implement §8.3 check 10: `pairwise_spectrum_diversity`
    perturbs the latent (`z_hat`), not the target spectrum; the spec asks for target-spectrum
    perturbation sensitivity. Deferred (no trained checkpoint to validate against).
@@ -138,15 +139,20 @@ against the released MetaDiT convention (`external/metadit/datapipe.py`, `model/
 
 ---
 
-## 4. Operator decisions requested
+## 4. Operator decisions — resolved 2026-09-13
 
-1. **Scalar conditioning scale** — standardise `(l, h, r)` before the scalar trunk/decoder-FiLM
-   (needs dataset means/stds; the scalar decoder's mean-bias init already hardcodes the means), or
-   keep raw values as the declared representation?
-2. **Occupancy decoder supervised only by physics** — add the §4.1 BCE term (new loss weight), or
-   document physics-only supervision as intended (it leaves the decoder untrained during stage B)?
-3. **Masker calibration** — calibrate block sizes so the achieved masked fraction matches the
-   requested ratio, or treat ratios as nominal buckets (achieved values are now logged)?
+1. **Scalar conditioning scale — KEEP RAW (no standardisation).** The three scalars stay in raw
+   physical units throughout the network, matching the config's declared representation. No code
+   change; revisit only if training curves show h-dependence lagging r-dependence.
+2. **Occupancy decoder supervision — ADD THE BCE TERM (implemented, commit `1c53f90`).**
+   `L_occ = BCEWithLogits(decoded occupancy, true occupancy)` on masked pixels; config
+   `loss.lambda_occ = 1.0` (validated ≥ 0). The decoder is now supervised from step 0, including
+   while `lambda_phys = 0` (staging B), instead of receiving no gradient at all.
+3. **Masker calibration — CALIBRATE (implemented, commit `9c8b9cb`).** `random_masks` redraws until
+   the achieved masked fraction is within ±2 % of the requested ratio, with the closest draw kept
+   as a bounded fallback; fixed seeds remain reproducible and the achieved fraction stays logged.
+   `sensitivity_masks` (half_sensitivity placement) remains nominal — its placement is
+   sensitivity-ranked, and its achieved coverage is reported by the same logging.
 
 ---
 
@@ -155,7 +161,7 @@ against the released MetaDiT convention (`external/metadit/datapipe.py`, `model/
 - **Local environment:** Python 3.14 / torch 2.14 CPU; the released weights and dataset splits are
   **not staged** locally, so data-dependent tests skip loudly by design.
 - **Test suite at the time of writing:** `python -m pytest tests/ -q --tb=line` →
-  **272 passed, 22 skipped, 0 failed** (skips: CUDA-only paths and not-staged data/weights).
+  **274 passed, 22 skipped, 0 failed** (skips: CUDA-only paths and not-staged data/weights).
 - **Static audit:** `python scripts/preflight/repo_static_audit.py` → 0 findings.
 - **Smokes run:** `train_unified.py --no-train --use-synthetic-smoke` (forward+backward),
   `--max-steps 3` synthetic training run with checkpoint write, evaluator unit paths.
