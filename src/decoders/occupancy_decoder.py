@@ -62,13 +62,11 @@ class OccupancyDecoder(nn.Module):
         hidden:          token embedding dimension (192).
         base_dim:        first conv feature count (hidden // 2 by default).
         scalar_hidden:   hidden width of the shared scalar-conditioning MLP.
-        in_groups:       GroupNorm group count for the first block.
 
     No 3-channel geometry head: the output is occupancy logits [B,1,64,64].
     """
 
-    def __init__(self, hidden=192, base_dim=96, scalar_hidden=128,
-                 in_groups=8):
+    def __init__(self, hidden=192, base_dim=96, scalar_hidden=128):
         super().__init__()
         self.hidden = hidden
         self.base_dim = base_dim

@@ -33,7 +33,6 @@ from assembly import (
 )
 from losses.unified_losses import (
     UnifiedJEPALoss,
-    OccupancyTokenLoss,
     ScalarPredictionLoss,
     PhysicsSpectrumLoss,
 )

@@ -453,6 +453,48 @@ _SURROGATE_PATH = os.path.join(
 _HAS_SURROGATE = os.path.exists(_SURROGATE_PATH)
 
 
+def test_decode_geometry_refuses_zero_gradient_hard_forward_in_training():
+    """Audit B18: hard_forward=True during training without STE would deliver a
+    zero-gradient occupancy to the surrogate — the combination must refuse."""
+    model = _build_model()
+    model.train()
+    z_hat = torch.randn(2, 256, 192)
+    pred = torch.rand(2, 3) * 2 + 1
+    with pytest.raises(AssertionError, match="hard_forward"):
+        model.decode_geometry(z_hat, pred, hard_forward=True, use_ste=False)
+
+
+def test_physics_loss_rejects_degenerate_spectrum_std():
+    """Audit B18: a near-constant target spectrum must raise instead of being
+    amplified through a silent 1e-6 standard-deviation floor."""
+    from physics.physics_loop import physics_loss_from_out
+
+    model = _build_model()
+    model.train()
+    torch.manual_seed(4)
+    occ = (torch.rand(2, 1, 64, 64) > 0.5).float()
+    sv = torch.rand(2, 3) * 2 + 1
+    spec = torch.rand(2, 2, 301)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=4).sample(occ, 0.5)
+    spec = torch.ones_like(spec)                 # constant → std = 0
+    sk = torch.ones(2, 3, dtype=torch.bool)
+    with torch.no_grad():
+        out = model(occ, sv, sk, spec, M, with_target=False)
+
+    class _SurrogateOut:
+        def __init__(self, prediction):
+            self.prediction = prediction
+
+    class _Surrogate(nn.Module):
+        def forward(self, x):
+            return _SurrogateOut(torch.zeros(x.shape[0], 2, 301))
+
+    with pytest.raises(RuntimeError, match="degenerate target spectrum"):
+        physics_loss_from_out(model, out, _Surrogate(), occ, sv, sk, spec, M,
+                              use_ste=True, normalize=True)
+
+
 def test_load_surrogate_rejects_unloadable_checkpoints(tmp_path):
     """Audit B9: an unloadable surrogate checkpoint must raise.
 

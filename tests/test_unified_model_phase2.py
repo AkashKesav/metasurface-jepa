@@ -438,6 +438,16 @@ def test_old_checkpoint_not_compatible():
         load_into_model(unified, old_sd, torch.device("cpu"), strict=True)
 
 
+def test_film_block_count_must_match_geo_depth():
+    """Audit B18: n_film_blocks != geo_depth must fail loudly at construction
+    (it otherwise surfaces as an opaque IndexError mid-forward)."""
+    torch.manual_seed(0)
+    with pytest.raises(AssertionError, match="n_film_blocks"):
+        UnifiedJEPA(hidden=192, num_heads=6, geo_depth=3, predictor_depth=2,
+                    goal_tokens=16, num_predictor_heads=6, scalar_hidden=128,
+                    n_film_blocks=2, spec_dim=256)
+
+
 def test_need_attn_returns_predictor_attention_weights():
     """Audit B16: need_attn=True must return the predictor's per-block
     cross-attention weights — the parameter was accepted and silently ignored,

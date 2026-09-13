@@ -54,7 +54,7 @@ def goal_dropout(goal_mode, p, rng=None):
 
 
 @torch.no_grad()
-def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
+def cfg_forward(model, occ, sv, sk, spec, mask, w):
     """Run classifier-free guidance inference (Fix 10: covers BOTH outputs).
 
     Performs two forward passes (real goal and null goal) and combines the
@@ -74,7 +74,6 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
         spec:      [B,2,301] spectrum.
         mask:      [B,16,16] visibility mask.
         w:         guidance scale.
-        device:    target device.
 
     Returns:
         z_hat_guided:   (B, 256, hidden) guided occupancy latent.
@@ -82,24 +81,29 @@ def cfg_forward(model, occ, sv, sk, spec, mask, w, device="cpu"):
         info: dict with raw z_hat_real/null, q_real/null, scalar_pred, and
               guidance gap scalars.
     """
+    # Audit B18: restore the caller's mode instead of leaving the model in
+    # eval() forever.
+    was_training = model.training
     model.eval()
+    try:
+        # Real-goal forward
+        out_real = model(occ, sv, sk, spec, mask,
+                         goal_mode="real", with_target=False)
+        z_real = out_real["z_hat"]
+        q_real = out_real["scalar_summary_pred"]
 
-    # Real-goal forward
-    out_real = model(occ, sv, sk, spec, mask,
-                     goal_mode="real", with_target=False)
-    z_real = out_real["z_hat"]
-    q_real = out_real["scalar_summary_pred"]
+        # Null-goal forward
+        out_null = model(occ, sv, sk, spec, mask,
+                         goal_mode="null", with_target=False)
+        z_null = out_null["z_hat"]
+        q_null = out_null["scalar_summary_pred"]
 
-    # Null-goal forward
-    out_null = model(occ, sv, sk, spec, mask,
-                     goal_mode="null", with_target=False)
-    z_null = out_null["z_hat"]
-    q_null = out_null["scalar_summary_pred"]
-
-    # Combine both branches.
-    z_guided = cfg_combine(z_real, z_null, w)
-    q_guided = cfg_combine(q_real, q_null, w)
-    scalar_guided = model.scalar_decoder(q_guided)
+        # Combine both branches.
+        z_guided = cfg_combine(z_real, z_null, w)
+        q_guided = cfg_combine(q_real, q_null, w)
+        scalar_guided = model.scalar_decoder(q_guided)
+    finally:
+        model.train(was_training)
 
     # Guidance gap: shared per-sample-L2 definition (audit B14) — the same
     # helper the §20.3 diagnostic uses, so the two cannot diverge.

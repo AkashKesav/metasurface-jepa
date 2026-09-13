@@ -188,6 +188,60 @@ def test_shipped_config_validates_cleanly():
     assert _validate_config(cfg) == []
 
 
+def test_regime_logger_tracks_achieved_mask_fraction():
+    """Audit B18: the requested curriculum ratio is nominal — block masking does
+    not achieve it exactly (min-side clamps inflate blocks, independent
+    placement overlaps them), so reports must carry the achieved fraction
+    alongside the requested one."""
+    from data.mask import BlockMasker
+    from train_unified import RegimeLogger
+
+    cfg = _load_cfg()
+    logger = RegimeLogger(cfg)
+    logger.record(0.25, "mixed", achieved_masked_fraction=0.42)
+    rep = logger.report()
+    assert "mask_fraction_achieved_mean" in rep, rep
+    assert abs(rep["mask_fraction_achieved_mean"][0.25] - 0.42) < 1e-9, rep
+
+    # The achieved fraction is not the requested one (measured, not assumed).
+    occ = torch.rand(4, 1, 64, 64)
+    masker = BlockMasker(placement="random", grid=16, min_side=3,
+                         k_range=(1, 4), seed=7)
+    achieved = [float((masker.sample(occ, 0.25) < 0.5).float().mean().item())
+                for _ in range(8)]
+    mean_achieved = sum(achieved) / len(achieved)
+    assert abs(mean_achieved - 0.25) > 1e-6, (
+        "requested 0.25 vs achieved — documenting the nominal-vs-achieved gap; "
+        f"got {mean_achieved:.3f}")
+
+
+def test_ema_gradient_guard_covers_surrogate():
+    """Audit B18: the per-step frozen guard must also catch gradients that leak
+    into the objective's registered surrogate."""
+    import types
+
+    import torch.nn as nn
+
+    from train_unified import _assert_no_ema_gradients
+
+    class _P(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = nn.Parameter(torch.ones(1))
+
+    model = types.SimpleNamespace(
+        ema=_P(), scalar_mlp_ema=_P(),
+        spectrum_path=types.SimpleNamespace(released=None))
+    surrogate = _P()
+    surrogate.w.grad = torch.ones_like(surrogate.w)
+    objective = types.SimpleNamespace(surrogate=surrogate)
+    with pytest.raises(RuntimeError, match="surrogate"):
+        _assert_no_ema_gradients(model, 3, objective)
+    # Without the objective (or with a clean surrogate) the guard passes.
+    surrogate.w.grad = None
+    _assert_no_ema_gradients(model, 3, objective)
+
+
 def test_scalar_masker_rng_evolves_across_batches():
     """Fix 3: scalar masking must use PERSISTENT RNG state — two mixed batches
     drawn from the SAME persistent bank must differ (RNG evolves), and the
@@ -293,7 +347,7 @@ def test_half_sensitivity_mask_uses_surrogate_geometry():
     assert occ.shape == (2, 1, 64, 64), "unified occupancy stays factorized"
 
     class _Logger:
-        def record(self, ratio, regime):
+        def record(self, ratio, regime, achieved_masked_fraction=None):
             pass
     result, M, sk = training_step(
         model, objective, occ, sv, spec, cfg, device, 0, masker, rng,
@@ -506,7 +560,7 @@ def test_optimizer_gradients_reset_each_step():
 
 class _RegimeLoggerStub:
     """Minimal RegimeLogger stand-in for training_step (records nothing)."""
-    def record(self, ratio, regime):
+    def record(self, ratio, regime, achieved_masked_fraction=None):
         pass
 
 
@@ -735,6 +789,13 @@ def test_resume_step_is_next_unrun_step():
         # Lines like "step     0  loss=..." -> set of executed step numbers.
         return {int(m) for m in re.findall(r"step\s+(\d+)\s+loss=", out)}
 
+    # Audit B18: never overwrite or delete live checkpoints from a test run.
+    existing = [p for p in (
+        os.path.join(REPO_ROOT, "checkpoints", "unified", f)
+        for f in ("latest.pt", "final.pt")) if os.path.exists(p)]
+    if existing:
+        pytest.skip("live checkpoints present at checkpoints/unified/ — "
+                    "refusing to overwrite or delete them from a test run")
     with tempfile.TemporaryDirectory() as td:
         # Run 1: 5 steps -> final checkpoint at step 4.
         cfg1 = _cfg(td, total_steps=5)

@@ -147,6 +147,13 @@ class UnifiedJEPA(nn.Module):
         self.goal_tokens = goal_tokens
         self.architecture_id = UNIFIED_ARCHITECTURE_ID
 
+        # Audit B18: the scalar encoder's FiLM heads must match the occupancy
+        # encoder's block count — a mismatch otherwise surfaces as an opaque
+        # IndexError mid-forward (or a silently dropped block).
+        assert n_film_blocks == geo_depth, (
+            f"n_film_blocks={n_film_blocks} must equal geo_depth={geo_depth} "
+            "(one FiLM pair per occupancy-encoder block)")
+
         # Student encoders
         self.occupancy_encoder = OccupancyEncoder(
             hidden=hidden, num_heads=num_heads, depth=geo_depth
@@ -447,6 +454,12 @@ class UnifiedJEPA(nn.Module):
             hard_occ = (soft_occ > 0.5).float()
             occ_for_assembly = hard_occ + soft_occ - soft_occ.detach()
         elif hard_forward:
+            # Audit B18: hard_forward during training without STE would deliver
+            # a zero-gradient occupancy to the surrogate (no backward path).
+            assert not self.training, (
+                "decode_geometry: hard_forward=True during training requires "
+                "use_ste=True — otherwise the deployed occupancy carries no "
+                "gradient; run this path under eval/no_grad for diagnostics")
             occ_for_assembly = (soft_occ > 0.5).float()
         else:
             occ_for_assembly = soft_occ

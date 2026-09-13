@@ -307,18 +307,31 @@ class RegimeLogger:
         self.scalar_regimes = cur["scalar_regimes"]
         self.mask_counts = {r: 0 for r in self.mask_ratios}
         self.regime_counts = {r: 0 for r in self.scalar_regimes}
+        # Audit B18: the REQUESTED ratio is nominal — block-mask coverage
+        # differs from it (min-side clamps + independent block overlap). Track
+        # the achieved masked fraction per requested bucket so reports never
+        # conflate requested with achieved.
+        self.mask_achieved = {r: [] for r in self.mask_ratios}
         self._total = 0
 
-    def record(self, ratio, regime):
+    def record(self, ratio, regime, achieved_masked_fraction=None):
         self.mask_counts[ratio] += 1
         self.regime_counts[regime] += 1
+        if achieved_masked_fraction is not None:
+            self.mask_achieved.setdefault(ratio, []).append(
+                float(achieved_masked_fraction))
         self._total += 1
 
     def report(self):
         n = max(1, self._total)
+        achieved = {
+            r: (sum(v) / len(v) if v else None)
+            for r, v in self.mask_achieved.items()
+        }
         return {
             "mask_freq": {r: c / n for r, c in self.mask_counts.items()},
             "regime_freq": {r: c / n for r, c in self.regime_counts.items()},
+            "mask_fraction_achieved_mean": achieved,
         }
 
 
@@ -326,8 +339,10 @@ class RegimeLogger:
 # per-step EMA-frozen guard (Phase 3 MD §6)
 # ---------------------------------------------------------------------------
 
-def _assert_no_ema_gradients(model, step):
-    """Per-step guard: EMA targets must receive no gradient (spec §6)."""
+def _assert_no_ema_gradients(model, step, objective=None):
+    """Per-step guard: EMA targets, the released encoder, and the objective's
+    registered frozen surrogate must receive no gradient (spec §6; audit B18:
+    the surrogate was previously outside this per-step guard)."""
     leaked = []
     for name, p in model.ema.named_parameters():
         if p.grad is not None and p.grad.abs().sum() > 0:
@@ -341,9 +356,15 @@ def _assert_no_ema_gradients(model, step):
         for name, p in released.named_parameters():
             if p.grad is not None and p.grad.abs().sum() > 0:
                 leaked.append(f"released.{name}")
+    surrogate = getattr(objective, "surrogate", None) if objective is not None else None
+    if surrogate is not None:
+        for name, p in surrogate.named_parameters():
+            if p.grad is not None and p.grad.abs().sum() > 0:
+                leaked.append(f"surrogate.{name}")
     if leaked:
         raise RuntimeError(
-            f"Step {step}: EMA/released params received gradient: {leaked}")
+            f"Step {step}: EMA/released/surrogate params received gradient: "
+            f"{leaked}")
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +446,9 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     result = objective(model, occ, sv, sk, spec, M, goal_mode=goal_mode)
     loss = result["total_loss"]
 
-    regime_logger.record(ratio, regime)
+    regime_logger.record(
+        ratio, regime,
+        achieved_masked_fraction=float((M < 0.5).float().mean().item()))
 
     return result, M, sk
 
@@ -482,6 +505,7 @@ def validate(model, objective, val_batches, cfg, device, strata=None):
                     "L_scalar": [], "L_phys": [], "L_phys_weighted": [],
                     "scalar_err": [],
                 }
+                achieved_fracs = []
                 for occ, sv, spec in val_batches:
                     B = occ.shape[0]
                     if scalars_known:
@@ -493,6 +517,9 @@ def validate(model, objective, val_batches, cfg, device, strata=None):
                     M = val_masker.sample(occ, mask_ratio).to(device)
                     assert M.device == occ.device, (
                         "validation mask must be on the model device")
+                    # Audit B18: report achieved coverage next to the requested
+                    # ratio (block masking does not hit the nominal fraction).
+                    achieved_fracs.append(float((M < 0.5).float().mean().item()))
                     result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
                     out_m = result["out"]
                     mask_bool = out_m["mask"]
@@ -537,6 +564,8 @@ def validate(model, objective, val_batches, cfg, device, strata=None):
 
                 stratum = {k: float(np.mean(v)) for k, v in metrics.items() if v}
                 stratum["mask_ratio"] = float(mask_ratio)
+                stratum["mask_ratio_achieved_mean"] = (
+                    float(np.mean(achieved_fracs)) if achieved_fracs else None)
                 stratum["scalars"] = ("all_known" if scalars_known
                                       else "all_unknown")
                 out[name] = stratum
@@ -813,7 +842,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             scalar_masker_bank=scalar_masker_bank)
         loss = result["total_loss"]
         loss.backward()
-        _assert_no_ema_gradients(model, 0)
+        _assert_no_ema_gradients(model, 0, objective)
         components = result["components"]
         print(f"[smoke] step=0  loss={float(loss.detach()):.4f}  "
               f"L_inv={components['L_inv']:.4f} "
@@ -894,7 +923,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
             clip_norm)
 
         # Guard: EMA must not receive gradients
-        _assert_no_ema_gradients(model, step)
+        _assert_no_ema_gradients(model, step, objective)
 
         optimizer.step()
         scheduler.step()

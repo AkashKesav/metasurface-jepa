@@ -27,23 +27,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from losses.jepa_loss import jepa_loss, ProjectionMLP
 from losses.vicreg import VICRegProjector, vicreg_branch_terms
-
-
-class OccupancyTokenLoss(nn.Module):
-    """JEPA / invariance loss on masked occupancy tokens (standalone).
-
-    Computes MSE between predicted and target latents on masked positions,
-    optionally through a projector. Returns (scalar_loss, per_sample).
-    """
-
-    def __init__(self, hidden=192, use_proj=True):
-        super().__init__()
-        self.projector = ProjectionMLP(hidden=hidden) if use_proj else None
-
-    def forward(self, z_hat, z_y_raw, mask):
-        return jepa_loss(z_hat, z_y_raw, mask, proj=self.projector)
 
 
 class ScalarPredictionLoss(nn.Module):

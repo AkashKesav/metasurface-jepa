@@ -528,8 +528,11 @@ def _load_eval(cfg, ckpt_path, device):
 
     surr_path = _resolve(cfg["weights"].get("surrogate", ""))
     if not os.path.exists(surr_path):
-        surr_path = os.path.join(REPO_ROOT, "data", "metadit", "weights",
-                                 "surrogate_model.bin")
+        raise RuntimeError(
+            f"surrogate weights not found at the configured path "
+            f"{surr_path!r} — refusing to silently fall back to a hardcoded "
+            "location (audit B18); stage the released surrogate or fix "
+            "weights.surrogate")
     surrogate = load_surrogate(surr_path, device=device)
     return model, surrogate
 

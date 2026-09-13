@@ -121,7 +121,15 @@ def physics_loss_from_out(model, out, surrogate, occ, sv, sk, spec, mask,
     spectrum_pred = result.prediction  # [B, 2, 301]
 
     if normalize:
-        spec_std = spec.std(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
+        spec_std = spec.std(dim=(-2, -1), keepdim=True)
+        # Audit B18: a near-constant target spectrum would be amplified by a
+        # silent 1e-6 floor into a meaningless loss — refuse instead.
+        std_min = float(spec_std.min().item())
+        if std_min < 1e-3:
+            raise RuntimeError(
+                "physics_loss: degenerate target spectrum (per-sample std "
+                f"{std_min:.2e} < 1e-3) — refusing to normalize by a floored "
+                "standard deviation")
         # Normalize BOTH prediction and target by the target's per-sample std
         # (Phase 4 MD §5: "normalized L1 or SmoothL1") so the wide dynamic
         # range of spectral amplitudes across samples doesn't dominate.
