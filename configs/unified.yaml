@@ -36,7 +36,18 @@ loss:
   lambda_occ: 1.0       # occupancy BCEWithLogits on masked pixels (§4.1,
                         # operator decision 2026-09-13: the decoder must be
                         # supervised even while lambda_phys = 0)
-  lambda_phys: 0.0      # physics loss — disabled until Phase 4 MD §4 activation
+  lambda_phys: 0.1      # physics loss ACTIVE (operator decision 2026-09-13).
+                        # Stage C, "tiny training with small physics loss"
+                        # (03_training_and_objective.md §5), ramped from zero.
+                        # The value sits at the low end of the diagnostic
+                        # protocol's sweep range {0.01, 0.1, 1, 10}
+                        # (scripts/diagnostics/protocol_v1/step7_lambda_sweep.py);
+                        # raise it only on evidence, one change per commit.
+                        # Rationale: L_phys is the only term that supervises the
+                        # DECODED GEOMETRY against the true spectrum, so it is the
+                        # mechanism that must make the conditioning content-
+                        # sensitive rather than a mere presence switch (see the
+                        # 20k-step finding in checkpoints/unified/REPORT.md §9.3).
   gamma: 1.0            # VICReg variance hinge threshold
   eps: 1.0e-4           # VICReg numerical epsilon
   scalar_loss_type: l1  # "l1" (default) or "huber" — wired (audit B17)
@@ -70,10 +81,20 @@ curriculum:
 
 # Physics loss staging (Phase 3 MD §5, extended Phase 4 MD §4.1)
 staging:
-  phase: B             # A=smoke, B=tiny no-phys, C=tiny small-phys, D=controlled (CFG+ramp), E=scale
-  lambda_phys_ramp_steps: 0  # Phase 4+ : ramp from 0 over these steps
-  physics_use_ste: true      # Phase 4 MD §3: STE documented choice (surrogate ReLU6
-                             # zero-Jacobian on soft fields, verified by soft_hard_occupancy_test)
+  phase: C             # A=smoke, B=tiny no-phys, C=tiny small-phys, D=controlled (CFG+ramp), E=scale
+                       # Operator decision 2026-09-13: B -> C now that the
+                       # pre-activation checks are green (physics_use_ste verified
+                       # load-bearing against the released surrogate, physics-alive
+                       # assertion in preflight, degenerate-spectrum guard measured
+                       # as unreachable). See checkpoints/unified/REPORT.md §7.
+  lambda_phys_ramp_steps: 500  # ramp lambda_phys 0 -> 0.1 over the first 500 steps
+                       # (03_training_and_objective.md §5: "Ramp lambda_phys from
+                       # zero. Do not immediately turn on a large physics loss.")
+  physics_use_ste: true      # REQUIRED with lambda_phys > 0, and now enforced:
+                             # the soft path is a silent dead end (0 student params
+                             # with gradient, L_phys 18.58 healthy-looking, soft
+                             # field 96% out of distribution). Verified by
+                             # soft_hard_occupancy_test against the real surrogate.
 
 weights:
   spectrum: data/metadit/weights/spec_encoder.pth
