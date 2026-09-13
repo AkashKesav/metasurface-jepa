@@ -1,18 +1,26 @@
 # Unified 192-D JEPA — cloud run report (Kaggle)
 
-**CURRENT STATUS: the acceptance gate PASSES on the hard stratum — §11 supersedes §4.**
-With the properly-powered 32-sample evaluation (audit B27), scenario A (pure inverse design = full
-occupancy mask + all scalars unknown) passes on **every** λ_phys arm tested, including the
-physics-off control: at the best arm (λ = 3.3201) the true spectrum scores **0.1679** against
-**0.5687** for a deranged one, with 96.9 % of the 32 samples supporting the comparison and a
-paired significance of t = −3.70 against the control. The earlier negative readings in §4 were
-produced by a **2-sample** estimator and are superseded — the correct statement is that the model
-was content-sensitive and the measurement could not see it (§11.2).
+**CURRENT STATUS: the acceptance gate PASSES, now at full scale — §12 supersedes §4 and §11.**
+A full epoch over the complete training split (70,000 steps, λ_phys = 3.32, 32-sample gate) passes
+on **all three scenarios**: A (hard stratum) real 0.8779 vs shuffled 1.2459 with **31/32 samples**
+supporting it, B 0.1078 vs 1.1825, C 0.0445 vs 0.1931. Scalar dependence passes both strata for
+the first time, and the independent goal probe agrees (real 0.0990 vs shuffled 0.6035, a **6.1×**
+margin).
 
-**Still open, and not fixed by physics:** scalar dependence fails in the one-known stratum for
-every arm (§11.4); the occupancy head partially re-collapses at high λ (fraction spread 0.088 →
-0.0364); and the best λ is still rising at the top of the swept range, so 3.3201 is a lower bound
-rather than a located optimum (§11.3).
+Two readings that matter more than the headline:
+
+- **Scenario A's mean is one sample.** Median real 0.0807 vs shuffled 0.6529 — the model is ~8×
+  better on the median sample, while a single pathological sample (real 25.06 against a 0.88
+  shuffled) drags the mean to 0.8779. Excluding it, real 0.0980 and the gap widens to +1.1597.
+  The gate passes either way, but the median is the honest summary and the outlier is a concrete
+  thing to diagnose.
+- **The objective degrades at scale even as the latent improves.** Over the epoch `raw_cos_err`
+  0.999 → 0.827 (better than the 20k plateau) while `L_inv` 1.38 → 8.26 and **`L_cov` 9.2 → 872**
+  (94×) with `L_var` fully satisfied. The `λ_cov = 1` vs `λ_var = 25` imbalance compounds over a
+  full epoch. **This is now the largest open defect**, and the next thing to fix.
+
+The earlier negative readings in §4 were produced by a **2-sample** estimator and are superseded:
+the model was content-sensitive and the measurement could not see it (§11.2).
 
 > **Correction (recorded rather than silently edited).** An earlier revision of this file listed
 > "generative diversity = 0.0" as evidence against the model. That was wrong: the evaluator's
@@ -68,6 +76,7 @@ kernel rather than left to chance: the run refuses to fall back to CPU and refus
 torch that does not match the validated pin.
 
 ---
+
 ---
 
 ## 2. Defects the cloud runs surfaced (all fixed before the evaluated run)
@@ -106,6 +115,7 @@ B21 is recorded in `docs/implementation/unified_jepa/AUDIT_REPORT_192D.md` §2; 
 their commit messages. Every fix is its own commit with a regression test.
 
 ---
+
 ---
 
 ## 3. Verification-scale run (CLOUD_TRAINING.md §1 step 6) — **PASSED**
@@ -167,6 +177,7 @@ Retrieved locally via `kaggle kernels output anosvol/metasurface-jepa-192d-verif
 > resuming from them.
 
 ---
+
 ---
 
 ## 4. Full run + acceptance gate — **the gate fails**
@@ -233,6 +244,7 @@ threshold decision; or (c) stop the line. No mechanism is to be added, and no th
 in order to make this gate pass.
 
 ---
+
 ---
 
 ## 5. Honest verification status
@@ -251,6 +263,7 @@ in order to make this gate pass.
 - **Local gate for the same commit:** `python -m pytest tests/ -q --tb=line` → **278 passed,
   23 skipped, 0 failed**; `scripts/preflight/repo_static_audit.py` → 0 findings.
   (One skip is a CUDA-gated regression test for B22 — see §2.)
+
 ---
 
 ## 6. Resume / repo hygiene
@@ -270,6 +283,7 @@ in order to make this gate pass.
   the time of writing. Rebuild the package from head for any further run so the pin stays exact.
 
 ---
+
 ---
 
 ## 7. Physics-path audit (pre-activation), 2026-09-13
@@ -373,6 +387,7 @@ epoch). Both readings predict that activating physics is the informative next ex
 is established yet.
 
 ---
+
 ---
 
 ## 8. EMA and pipeline wiring audit, 2026-09-13
@@ -470,6 +485,7 @@ were re-verified by me independently of the agent report that produced them.
 4. **`validate` hardcodes `placement="random"`** (`train_unified.py:501-503,589-591`) regardless of
    `cfg.curriculum.mask_placement`. With `half_sensitivity` configured, training and validation
    would mask differently; currently both are `random`, so it is latent.
+
 ---
 
 ## 9. Long run (20,000 steps) — the learning verdict, 2026-09-13
@@ -538,6 +554,7 @@ This is a sharper statement of the failure than "the gate is red": the spectrum 
 model as a mode switch, not as a target to fit. It also means the projector-absorption hypothesis
 (§7.4) is only *part* of the story — the representation improved and the decoder un-collapsed, so
 absorption is not total.
+
 ---
 
 ## 10. Physics ON — activation validated, and a gate-precision finding (2026-09-13)
@@ -607,6 +624,7 @@ on 2 samples cannot settle the question in either direction. It must be evaluate
 sample size before any conclusion is drawn from §10.2. Making the evaluation batch a first-class
 parameter (and reporting per-sample errors, not just batch means) is the next change; because it
 moves the gate's numbers it is recorded here as an operator decision rather than applied silently.
+
 ---
 
 ## 11. λ_phys sweep — results (2026-09-13)
@@ -711,3 +729,76 @@ selects nothing): the quality ordering above is what actually decides, and λ = 
 - The previously reported negative result is superseded: it was produced by a 2-sample estimator.
   The correct statement is *the model was content-sensitive and the measurement could not see it*.
 - λ = 0.1 was a **harmful** value, not merely an inert one; λ = 3.3201 is the best measured.
+
+---
+
+## 12. Full epoch on the complete training split (2026-09-13)
+
+Kernel `anosvol/metasurface-jepa-192d-full-epoch` (v1), commit `096ca6b`, λ_phys = 3.32, staging D.
+All stages `exit=0`: preflight 21 s, **70,000 steps in 7,812 s (2 h 10 m)** — one epoch over the
+full ~140k-sample training split at batch 2 — eval 16 s, goal probe 10 s, EMA probe 3 s.
+This is the first run that is both properly powered (32-sample gate) and full-scale.
+
+### 12.1 The gate passes on all three scenarios
+
+| scenario | real | null | shuffled | gap | gate | beats fraction | paired σ |
+|---|---|---|---|---|---|---|---|
+| **A** (hard stratum) | 0.8779 | 0.5632 | 1.2459 | +0.3680 | **pass** | 31/32 | 5.7795 |
+| **B** (partial params) | 0.1078 | 0.4898 | 1.1825 | +1.0747 | **pass** | 0.938 | 3.6492 |
+| **C** (retrofit) | 0.0445 | 0.1119 | 0.1931 | +0.1486 | **pass** | 0.906 | 0.2296 |
+
+Scalar dependence now passes **both** strata for the first time (one-known 0.913926 vs 0.916606;
+two-known 0.123611 vs 0.124269 — the second by a margin of 0.0007, so "passes" is technical), and
+the goal probe agrees with the gate: real **0.0990** vs shuffled 0.6035 vs null 0.6065 — a
+**6.1×** margin on the hard stratum.
+
+### 12.2 Scenario A's mean is one sample — the median is the honest summary
+
+The `paired σ` of 5.78 on a meagre +0.3680 gap is the tell. Per-sample:
+
+| | real | shuffled |
+|---|---|---|
+| median | **0.0807** | **0.6529** |
+| mean | 0.8779 | 1.2459 |
+| min / max | 0.0157 / **25.0568** | 0.0507 / 21.2290 |
+
+**A single sample (index 7) scores real = 25.06 against shuffled = 0.88** — a −24.18 paired
+difference. Removing it changes the picture completely:
+
+- real mean: **0.8779 → 0.0980**
+- gap: **+0.3680 → +1.1597**
+- and the apparent anomaly that `null (0.5632) < real (0.8779)` disappears (real 0.098 ≪ null 0.563)
+
+So the model is **good on 31 of 32 samples** (median 8× better than shuffled) with one
+pathological failure that dominates the mean. The gate passes either way — but the mean is not a
+robust summary of scenario A, and the sample-7 failure is a concrete, isolated thing to diagnose.
+
+This also reconciles the probe-versus-gate discrepancy seen earlier: the probe samples indices
+0–7 via `seed=0`, the evaluator samples 0–31 via `seed=42`, and the pathological sample falls in
+the evaluator's batch but not the probe's. Neither measurement was wrong; they were different
+samples.
+
+### 12.3 Trajectory over the epoch — the objective degrades even as the raw latent improves
+
+| quantity | first | last (step 69,950) |
+|---|---|---|
+| `raw_mse` (easy) | 5.8113 | **4.4055** |
+| `raw_cos_err` (easy) | 0.9994 | **0.8271** |
+| `proj_mse` (= `L_inv`, easy) | 1.3822 | **8.2556** |
+| `L_var` (easy) | 0.6005 | **0.0024** |
+| `L_cov` (easy) | 9.2381 | **872.18** |
+| `z_hat` norm | 9.6067 | 6.3922 |
+| `z_y` norm | 30.2278 | 27.8660 |
+
+- **The raw representation improves over the full epoch** — `raw_cos_err` 0.999 → 0.827, better
+  than the 20k-step plateau (0.859) — so one epoch does buy something the short runs could not.
+- **But the projector-space objective degrades badly**: `L_inv` 1.38 → 8.26 (6× worse) and
+  `L_cov` 9.24 → **872** (94× worse) while `L_var` collapses to 0.0024 (the variance hinge is
+  fully satisfied). At `λ_cov = 1` against `λ_var = 25` the covariance term cannot hold back the
+  variance inflation, and over a full epoch that imbalance compounds. This is the single largest
+  open objective defect and it is now measured at scale rather than inferred.
+- EMA tracking is the best measured yet: **9.2e-05 / 8.6e-05** relative distance (0.009 %).
+- Occupancy collapse did **not** worsen at scale: predicted fraction `0.4305 ± 0.0776` against a
+  true 0.3989 — better spread than the 10k-step λ=3.32 arm's 0.0364.
+- CFG: `w=0` 0.5632, `w=0.5` 0.4164, `w=1` 0.8779, `w≥2` 10.0–16.5. Still "no guidance is best",
+  and the non-monotonicity is again the outlier in scenario A, not a change in the model.
