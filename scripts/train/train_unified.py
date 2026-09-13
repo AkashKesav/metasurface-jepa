@@ -368,7 +368,7 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     return result, M, sk
 
 
-def validate(model, objective, val_batches, cfg, device):
+def validate(model, objective, val_batches, cfg, device, strata=None):
     """Run validation on a list of pre-built (occ, sv, spec) batches.
 
     Unified model signature: model(occupancy, scalar_values, scalar_known,
@@ -377,6 +377,16 @@ def validate(model, objective, val_batches, cfg, device):
     a raw-vs-projected discrepancy (projector/statistics problem) can be
     distinguished from a genuine representation failure.
 
+    Stratified reporting (audit B6, architecture_v5.md §8.3): metrics are
+    returned PER STRATUM, never pooled —
+      easy : low occupancy mask + all scalars known
+      hard : full occupancy mask + all scalars unknown (pure inverse design)
+    The hard stratum is where the design's spectrum/scalar-dependence gates
+    apply; a pooled number can look healthy while genuine dependence is absent
+    exactly there. Stratum mask ratios must be > 0: with zero masked tokens
+    the masked-token objective is undefined and VICReg raises by contract
+    (no silent zero substitution).
+
     Field-name convention (item 7):
       - raw_*      : computed on z_hat / z_y_raw (encoder output space)
       - proj_*     : computed on p_hat / p_y (objective projector space,
@@ -384,90 +394,111 @@ def validate(model, objective, val_batches, cfg, device):
       - L_*        : the training objective's loss components
       - L_total    : the FULL training objective (all weighted terms) — NOT a
                      reconstruction/physics metric; do not read it as one.
+      - mask_ratio / scalars: the stratum metadata (never averaged away).
     """
     model.eval()
     objective.eval()
-    val_mask_ratio = cfg["curriculum"].get("val_mask_ratio", 0.5)
-    val_masker = BlockMasker(
-        placement="random", grid=16, min_side=3, k_range=(1, 4),
-        seed=12345)
-    metrics = {
-        "raw_mse": [], "raw_cos_err": [], "raw_z_hat_norm": [],
-        "raw_z_y_norm": [],
-        "proj_mse": [], "proj_cos_err": [], "proj_p_hat_norm": [],
-        "proj_p_y_norm": [],
-        "L_total": [], "L_inv": [], "L_var": [], "L_cov": [],
-        "L_scalar": [], "L_phys": [], "L_phys_weighted": [],
-        "scalar_err": [],
-    }
+    cur = cfg.get("curriculum", {})
+    if strata is None:
+        strata = [
+            ("easy", float(cur.get("easy_mask_ratio", 0.5)), True),
+            ("hard", float(cur.get("hard_mask_ratio", 1.0)), False),
+        ]
+    out = {}
     try:
         with torch.no_grad():
-            for occ, sv, spec in val_batches:
-                B = occ.shape[0]
-                sk = torch.ones(B, 3, dtype=torch.bool, device=device)  # all known for val
-                # Validation masks are deterministic (fixed seed) and
-                # explicitly transferred to the model device.
-                M = val_masker.sample(occ, val_mask_ratio).to(device)
-                assert M.device == occ.device, (
-                    "validation mask must be on the model device")
-                result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
-                out = result["out"]
-                mask_bool = out["mask"]
-                z_hat, z_y = out["z_hat"], out["z_y_raw"]
+            for name, mask_ratio, scalars_known in strata:
+                val_masker = BlockMasker(
+                    placement="random", grid=16, min_side=3, k_range=(1, 4),
+                    seed=12345)
+                metrics = {
+                    "raw_mse": [], "raw_cos_err": [], "raw_z_hat_norm": [],
+                    "raw_z_y_norm": [],
+                    "proj_mse": [], "proj_cos_err": [], "proj_p_hat_norm": [],
+                    "proj_p_y_norm": [],
+                    "L_total": [], "L_inv": [], "L_var": [], "L_cov": [],
+                    "L_scalar": [], "L_phys": [], "L_phys_weighted": [],
+                    "scalar_err": [],
+                }
+                for occ, sv, spec in val_batches:
+                    B = occ.shape[0]
+                    if scalars_known:
+                        sk = torch.ones(B, 3, dtype=torch.bool, device=device)
+                    else:
+                        sk = torch.zeros(B, 3, dtype=torch.bool, device=device)
+                    # Validation masks are deterministic (fixed seed) and
+                    # explicitly transferred to the model device.
+                    M = val_masker.sample(occ, mask_ratio).to(device)
+                    assert M.device == occ.device, (
+                        "validation mask must be on the model device")
+                    result = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+                    out_m = result["out"]
+                    mask_bool = out_m["mask"]
+                    z_hat, z_y = out_m["z_hat"], out_m["z_y_raw"]
 
-                # --- RAW latent space diagnostics (masked tokens only) ---
-                z_hat_m = z_hat[mask_bool]
-                z_y_m = z_y[mask_bool]
-                raw_mse = torch.nn.functional.mse_loss(z_hat_m, z_y_m)
-                raw_cos = (1 - torch.nn.functional.cosine_similarity(
-                    z_hat_m, z_y_m, dim=-1).clamp(min=0)).mean()
-                metrics["raw_mse"].append(float(raw_mse))
-                metrics["raw_cos_err"].append(float(raw_cos))
-                metrics["raw_z_hat_norm"].append(
-                    float(z_hat_m.norm(dim=-1).mean()))
-                metrics["raw_z_y_norm"].append(
-                    float(z_y_m.norm(dim=-1).mean()))
+                    # --- RAW latent space diagnostics (masked tokens only) ---
+                    z_hat_m = z_hat[mask_bool]
+                    z_y_m = z_y[mask_bool]
+                    raw_mse = torch.nn.functional.mse_loss(z_hat_m, z_y_m)
+                    raw_cos = (1 - torch.nn.functional.cosine_similarity(
+                        z_hat_m, z_y_m, dim=-1).clamp(min=0)).mean()
+                    metrics["raw_mse"].append(float(raw_mse))
+                    metrics["raw_cos_err"].append(float(raw_cos))
+                    metrics["raw_z_hat_norm"].append(
+                        float(z_hat_m.norm(dim=-1).mean()))
+                    metrics["raw_z_y_norm"].append(
+                        float(z_y_m.norm(dim=-1).mean()))
 
-                # --- PROJECTED latent space diagnostics (same tokens) ---
-                # p_hat/p_y are exactly the tensors L_inv uses.
-                p_hat_full = result["projector_outputs"]["p_hat"]
-                p_y_full = result["projector_outputs"]["p_y"]
-                p_hat_m = p_hat_full[mask_bool]
-                p_y_m = p_y_full[mask_bool]
-                proj_mse = torch.nn.functional.mse_loss(p_hat_m, p_y_m)
-                proj_cos = (1 - torch.nn.functional.cosine_similarity(
-                    p_hat_m, p_y_m, dim=-1).clamp(min=0)).mean()
-                metrics["proj_mse"].append(float(proj_mse))
-                metrics["proj_cos_err"].append(float(proj_cos))
-                metrics["proj_p_hat_norm"].append(
-                    float(p_hat_m.norm(dim=-1).mean()))
-                metrics["proj_p_y_norm"].append(
-                    float(p_y_m.norm(dim=-1).mean()))
+                    # --- PROJECTED latent space diagnostics (same tokens) ---
+                    # p_hat/p_y are exactly the tensors L_inv uses.
+                    p_hat_full = result["projector_outputs"]["p_hat"]
+                    p_y_full = result["projector_outputs"]["p_y"]
+                    p_hat_m = p_hat_full[mask_bool]
+                    p_y_m = p_y_full[mask_bool]
+                    proj_mse = torch.nn.functional.mse_loss(p_hat_m, p_y_m)
+                    proj_cos = (1 - torch.nn.functional.cosine_similarity(
+                        p_hat_m, p_y_m, dim=-1).clamp(min=0)).mean()
+                    metrics["proj_mse"].append(float(proj_mse))
+                    metrics["proj_cos_err"].append(float(proj_cos))
+                    metrics["proj_p_hat_norm"].append(
+                        float(p_hat_m.norm(dim=-1).mean()))
+                    metrics["proj_p_y_norm"].append(
+                        float(p_y_m.norm(dim=-1).mean()))
 
-                # --- Loss components (composition is explicit) ---
-                c = result["components"]
-                for k in ("L_total", "L_inv", "L_var", "L_cov", "L_scalar",
-                          "L_phys", "L_phys_weighted"):
-                    metrics[k].append(float(c[k]))
-                se = (out["scalar_pred"] - sv).abs().mean()
-                metrics["scalar_err"].append(float(se))
+                    # --- Loss components (composition is explicit) ---
+                    c = result["components"]
+                    for k in ("L_total", "L_inv", "L_var", "L_cov", "L_scalar",
+                              "L_phys", "L_phys_weighted"):
+                        metrics[k].append(float(c[k]))
+                    se = (out_m["scalar_pred"] - sv).abs().mean()
+                    metrics["scalar_err"].append(float(se))
+
+                stratum = {k: float(np.mean(v)) for k, v in metrics.items() if v}
+                stratum["mask_ratio"] = float(mask_ratio)
+                stratum["scalars"] = ("all_known" if scalars_known
+                                      else "all_unknown")
+                out[name] = stratum
     finally:
         model.train()
         objective.train()
 
-    out = {k: float(np.mean(v)) for k, v in metrics.items() if v}
-
-    # Phase 4 MD §20.3: guidance gap diagnostic at validation time
+    # Phase 4 MD §20.3: guidance-gap diagnostic on the HARD stratum (the
+    # stratum where spectrum-dependence is the gate), never pooled.
     try:
         from diagnostics.guidance_gap import compute_guidance_gap
+        hard_ratio = float(cur.get("hard_mask_ratio", 1.0))
         occ_v, sv_v, spec_v = val_batches[0]
         B = occ_v.shape[0]
-        sk_v = torch.ones(B, 3, dtype=torch.bool, device=device)
-        M = val_masker.sample(occ_v, val_mask_ratio).to(device)
+        sk_v = torch.zeros(B, 3, dtype=torch.bool, device=device)
+        gap_masker = BlockMasker(
+            placement="random", grid=16, min_side=3, k_range=(1, 4),
+            seed=12345)
+        M = gap_masker.sample(occ_v, hard_ratio).to(device)
         gap_info = compute_guidance_gap(
             model, occ_v, sv_v, sk_v, spec_v, M, device=device)
         out["guidance_gap"] = gap_info["guidance_gap"]
         out["normalized_guidance_gap"] = gap_info["normalized_guidance_gap"]
+        out["guidance_gap_stratum"] = "hard"
     except Exception as e:
         out["guidance_gap_error"] = str(e)
 

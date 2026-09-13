@@ -232,13 +232,21 @@ def test_validate_uses_unified_signature():
     occ, sv, spec = _batch(seed=7)
     val_batches = [(occ, sv, spec)]
     cfg = {
-        "curriculum": {"val_mask_ratio": 0.5},
+        "curriculum": {"easy_mask_ratio": 0.5, "hard_mask_ratio": 1.0},
     }
     out = validate(model, objective, val_batches, cfg, "cpu")
-    for k in ("raw_mse", "raw_cos_err", "proj_mse", "proj_cos_err",
-              "L_inv", "L_total", "L_phys_weighted"):
-        assert k in out, f"validation must report {k}"
-    assert torch.isfinite(torch.tensor(list(out.values()))).all()
+    assert {"easy", "hard"}.issubset(out), (
+        f"validation must report easy and hard strata separately, got "
+        f"{sorted(out)}")
+    for stratum in ("easy", "hard"):
+        for k in ("raw_mse", "raw_cos_err", "proj_mse", "proj_cos_err",
+                  "L_inv", "L_total", "L_phys_weighted"):
+            assert k in out[stratum], f"validation must report {stratum}.{k}"
+        vals = torch.tensor([v for v in out[stratum].values()
+                             if isinstance(v, float)])
+        assert torch.isfinite(vals).all(), f"{stratum} metrics must be finite"
+    assert out["hard"]["scalars"] == "all_unknown"
+    assert out["easy"]["scalars"] == "all_known"
 
 
 if __name__ == "__main__":

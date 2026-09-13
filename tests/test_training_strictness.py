@@ -126,6 +126,36 @@ def test_curriculum_rng_state_round_trips_through_checkpoints(tmp_path, monkeypa
         f"captured:\n{out}")
 
 
+def test_validate_reports_easy_and_hard_strata(tmp_path, monkeypatch, capsys):
+    """Audit B6: validation must report the easy and hard strata separately,
+    never as one pooled metric.
+
+    easy: low occupancy mask + all scalars known.
+    hard: full occupancy mask + all scalars unknown — the pure-inverse-design
+    stratum the design's gates apply to (architecture_v5.md §8.3).
+    """
+    import json as _json
+
+    import train_unified
+    from train_unified import train
+
+    monkeypatch.setattr(train_unified, "REPO_ROOT", str(tmp_path))
+    cfg = _load_cfg()
+    cfg["train"]["val_every_steps"] = 1
+    train(cfg, use_synthetic_smoke=True, max_steps=2, device="cpu")
+    out = capsys.readouterr().out
+    val_lines = [ln for ln in out.splitlines() if ln.strip().startswith("[val]")]
+    assert val_lines, "validation must run with val_every_steps=1"
+    metrics = _json.loads(val_lines[-1].split("[val]", 1)[1].strip())
+    assert "easy" in metrics and "hard" in metrics, (
+        "validation must report easy and hard strata separately (never pooled); "
+        f"got keys {sorted(metrics)}")
+    assert metrics["hard"]["mask_ratio"] == 1.0, metrics["hard"]
+    assert metrics["hard"]["scalars"] == "all_unknown", metrics["hard"]
+    assert metrics["easy"]["scalars"] == "all_known", metrics["easy"]
+    assert "L_total" in metrics["hard"] and "L_total" in metrics["easy"]
+
+
 def test_scalar_masker_rng_evolves_across_batches():
     """Fix 3: scalar masking must use PERSISTENT RNG state — two mixed batches
     drawn from the SAME persistent bank must differ (RNG evolves), and the
