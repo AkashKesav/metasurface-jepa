@@ -4,15 +4,24 @@
 The full 1500-step run completed and was evaluated per scenario; on scenario A (pure inverse
 design = full occupancy mask + all scalars unknown) the model is **no better with the true
 spectrum than with a shuffled one** (`real 0.6336` vs `shuffled 0.6332`, gate criterion
-`real < shuffled` → **false**), the decoded design is **deterministic under a perturbed target
-spectrum** (`diversity_A = 0.0`), scalar conditioning is **exactly zero** in the one-known
-stratum (`0.6261729598045349` identical for real and shuffled), and the trivial L1
-nearest-neighbour retrieval baseline is **~8.5× better** than the model (`0.0744` vs `0.6336`).
-Full numbers in §4. The pipeline itself is verified (§3).
+`real < shuffled` → **false**), scalar conditioning shows **no measurable effect** (the one-known
+stratum's real and shuffled errors are bit-identical), and the trivial L1 nearest-neighbour
+retrieval baseline is **~8.5× better** than the model (`0.0744` vs `0.6336`). Full numbers in §4.
+The pipeline itself is verified (§3).
+
+> **Correction (recorded rather than silently edited).** An earlier revision of this file listed
+> "generative diversity = 0.0" as evidence against the model. That was wrong: the evaluator's
+> `diversity_check` runs with its default `perturbation_scale=0.0`, which is a **determinism**
+> check (same input → identical output), and its own docstring says the result "must not be
+> presented as genuine generative diversity". The spec's actual probe — *perturb the target
+> spectrum slightly and confirm the decoded design moves proportionally*
+> (`architecture_v5.md` §8.3) — is **not implemented** (see §7). The negative result rests on the
+> real-vs-shuffled gate, the scalar-dependence result, the retrieval baseline and the collapse
+> check, not on the determinism check.
 
 **This is recorded, not acted on.** Per `AGENTS.md` → *If something fails*, the response to a
 failed gate is to record the observed numbers and escalate for a scope decision — never to add
-mechanisms or loosen a threshold to make it pass. See §4.3 for the decision point.
+mechanisms or loosen a threshold to make it pass. See §4.3.
 
 The gate is the per-scenario hard-stratum real-vs-shuffled physics-consistency gap
 (`architecture_v5.md` §8.3 check 8), reported per scenario and never pooled.
@@ -181,8 +190,11 @@ and it fails.
 
 ### 4.2 Corroborating diagnostics (same evaluation)
 
-- **Generative diversity — fails outright.** `diversity_A`: `pairwise_spectrum_diversity = 0.0`,
-  `deterministic = true`. Perturbing the target spectrum does not move the decoded design at all.
+- **Spectrum-sensitivity probe — not implemented (see the correction in the banner and §7).**
+  `diversity_A` (`pairwise_spectrum_diversity = 0.0`, `deterministic = true`) is a **determinism**
+  check that passed; it is not evidence of anything about the spectrum. The spec's
+  perturb-the-target-spectrum probe does not exist in the evaluator, so this gate is currently
+  **unmeasured**, not failed.
 - **Scalar dependence — zero.** `scalar_dependence_one_known`: real and shuffled are
   **bit-identical** (`0.6261729598045349`). `scalar_dependence_two_known`: `0.3237603` vs
   `0.3237450` (≈1.5e-5). Neither gate passes; the scalars are not influencing the decode.
@@ -250,3 +262,89 @@ in order to make this gate pass.
   next experiment (§4.3a) — are cheap; the fixed cost per session is the ~205 s torch pin install.
 - **Deviation to be aware of:** the evaluated package is pinned at `330f941`, the branch head at
   the time of writing. Rebuild the package from head for any further run so the pin stays exact.
+
+---
+
+## 7. Physics-path audit (pre-activation), 2026-09-13
+
+Run before enabling `lambda_phys`, because the spec makes several checks preconditions
+(`04 §3` "Do not silently choose STE without the check"; `04 §13` acceptance list; `03 §5`
+"Ramp lambda_phys from zero"). Code read: `src/physics/physics_loop.py`,
+`src/losses/unified_losses.py`, `src/assembly.py::decode_geometry`,
+`scripts/train/train_unified.py`, `configs/unified.yaml`.
+
+### 7.1 Correctly wired (verified in source)
+
+1. **The path matches the spec.** `z_hat` + `scalar_pred` → `decode_geometry` → assembled
+   `[B,3,64,64]` → frozen surrogate → normalized SmoothL1 against the true spectrum
+   (`physics_loop.physics_loss_from_out`; `architecture_v5.md` §4.3, `04 §4`). One student
+   forward, one physics decode, one surrogate forward — no second spectrum predictor (`04 §5`).
+2. **Frozen-but-differentiable surrogate.** `load_surrogate` sets `requires_grad_(False)` +
+   `.eval()` on the parameters but leaves the forward differentiable w.r.t. geometry, and
+   `UnifiedJEPALoss.train()` re-pins the surrogate to eval so `objective.train()` cannot flip its
+   38 BatchNorm layers into batch-stat mode (the corruption protocol-v1 recorded). Matches `03 §6`
+   / `04 §4`.
+3. **Normalisation.** Per-sample **target** std, applied to both prediction and target, with
+   `smooth_l1` — the spec's "normalized L1 or SmoothL1", real/imag convention preserved.
+4. **Ramp.** `objective.lambda_phys = lambda_phys * min(1, (step+1)/ramp_steps)` when
+   `ramp_steps > 0`, recomputed from `step` every iteration — so it is resume-consistent without
+   separate schedule state. `03 §5` ("Ramp lambda_phys from zero") is satisfied.
+5. **Retention and known-scalar substitution** are applied inside `decode_geometry` before
+   assembly, so physics cannot overwrite observed geometry (`04 §6`,
+   `architecture_v5.md` §4.1).
+6. **Null-step skip** (operator decision recorded in `AGENTS.md`, audit B5) — `goal_mode != "null"`
+   gates `L_phys`; the spectrum-free terms still train that branch.
+7. **Per-step frozen guard covers the surrogate** (audit B18) — `_assert_no_ema_gradients(model,
+   step, objective)` checks `ema`, `scalar_mlp_ema`, the released encoder **and**
+   `objective.surrogate`.
+8. **Fail-loud loading.** With `lambda_phys > 0` in real mode, a missing/unusable surrogate
+   checkpoint raises instead of silently substituting a zero placeholder (audit B9/Fix 3), and
+   `_validate_config` refuses `staging.phase` A/B with `lambda_phys > 0` (audit B17).
+
+### 7.2 Broken or missing (must be addressed around activation)
+
+1. **The STE decision has never been verified against the real surrogate — and the config claims
+   it has.** `configs/unified.yaml` says `physics_use_ste: true  # ...verified by
+   soft_hard_occupancy_test`. In fact `surrogate_gradient_test` and `soft_hard_occupancy_test` are
+   invoked **only from `tests/test_phase4_physics.py`**, and those tests are `skipif`-gated on
+   `data/metadit/weights/surrogate_model.bin`, which the dev machine does not stage — so they
+   skip locally, and the Kaggle kernel runs preflight + training, never the test suite. The spec
+   forbids exactly this state: `04 §3` "Do not silently choose STE without the check";
+   `architecture_v5.md` §8.1.4 requires confirming the surrogate is sane on soft fields;
+   `04 §13` lists "surrogate gradient test passes" and "soft/hard occupancy behavior is
+   characterized" as pre-scaling gates. **Must be run with the real weights before activation.**
+2. **Nothing asserts the physics term actually reaches the student.** The preflight counts student
+   parameters that received gradient, but those gradients also come from
+   `L_inv/L_var/L_cov/L_occ` — a physics path with a dead Jacobian would pass the ownership check
+   unnoticed. The invariant to assert is narrower: *with physics active, some student parameter's
+   gradient changes when `lambda_phys` goes 0 → >0.*
+3. **The spec's spectrum-sensitivity probe is not implemented.** `architecture_v5.md` §8.3:
+   "Test by perturbing the target spectrum slightly with everything else fixed and confirming the
+   decoded design changes proportionally". The evaluator's `diversity_check` defaults to
+   `perturbation_scale=0.0`, which is a determinism check (its docstring: must not be presented as
+   genuine generative diversity); with `perturbation_scale > 0` it perturbs `z_hat`, not the
+   target spectrum. This is the single most diagnostic probe for the failure just measured.
+4. **Validation reports `L_phys = 0` while physics is active.** `physics_active` requires
+   `model.training`, and `validate()` runs under `model.eval()` + `no_grad()`, so the validation
+   JSON will show `L_phys: 0.0` / `L_phys_weighted: 0.0` in every physics-enabled run. The gating
+   itself is defensible (in eval mode `decode_geometry` takes the soft path — a different
+   quantity), but reporting a hard `0.0` is misleading; it should be reported as not-evaluated.
+5. **`PhysicsSpectrumLoss` is inert dead code.** `_enabled` is never set (`enable()` has no
+   callers), so the inactive branch always returns a zero tensor — a placeholder that reads like a
+   real fallback.
+6. **Degenerate-spectrum crash risk, never exercised on real data.** The B18 guard raises
+   `RuntimeError` when any sample's spectrum std `< 1e-3`. With physics active this runs every
+   step against the real splits, which the dev machine cannot load. If any real sample trips it,
+   the run dies mid-training. Cheap to measure on the cloud before committing to a long run.
+
+### 7.3 What the negative result most plausibly means (hypothesis, not conclusion)
+
+The predictor *is* goal-sensitive — validation's guidance gap on the hard stratum was 2.47 → 3.06
+(normalized) and non-zero. But the **decode** is not: scenario A's real-vs-shuffled errors differ
+by 0.0004, and the predicted occupancy fraction is nearly constant (`0.5012 ± 0.0066` against a
+true `0.3989`). That pattern — goal-sensitive latent, goal-insensitive output near the dataset
+mean — is consistent with **decoder collapse to the mean**, which is exactly what `L_occ` alone
+permits (with only BCE supervision, the mean occupancy is a competitive solution) and exactly what
+the physics term is supposed to break. It is also consistent with plain under-training (~2 % of an
+epoch). Both readings predict that activating physics is the informative next experiment; neither
+is established yet.
