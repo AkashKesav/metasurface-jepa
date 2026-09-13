@@ -657,6 +657,7 @@ def train(cfg, resume_path=None, no_train=False, device=None,
 
     # --- resume ---
     start_step = 0
+    curriculum_rng_state = None
     if resume_path and os.path.exists(resume_path):
         print(f"Resuming from {resume_path}")
         ckpt = load_checkpoint(
@@ -684,6 +685,15 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                   f"{int(ckpt_total)} -> this run {int(total_steps)} steps; "
                   "the EMA ramp follows THIS run's schedule (matching the LR "
                   "cosine schedule rebuilt from config).")
+        # Audit B4: the private curriculum generator drives mask ratio, scalar
+        # regime, and goal dropout; its state must round-trip or a resumed run
+        # silently restarts the sampling stream from the seed.
+        curriculum_rng_state = ckpt.get("curriculum_rng_state")
+        if curriculum_rng_state is None:
+            print("[resume] WARNING: checkpoint has no curriculum RNG state "
+                  "(legacy checkpoint) — mask-ratio/scalar-regime/goal-dropout "
+                  "sampling restarts from the seed and will not match an "
+                  "uninterrupted run.")
         print(f"Resumed at step {start_step}")
 
     # --- no-train smoke ---
@@ -721,6 +731,9 @@ def train(cfg, resume_path=None, no_train=False, device=None,
     model.train()
     objective.train()
     rng = torch.Generator().manual_seed(cfg["train"].get("seed", 42))
+    if curriculum_rng_state is not None:
+        rng.set_state(curriculum_rng_state)
+        print("[resume] curriculum RNG state restored")
     regime_logger = RegimeLogger(cfg)
     batch_size = train_cfg.get("batch_size", 2)
     grad_accum = train_cfg.get("grad_accum", 1)
@@ -821,7 +834,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                 health={}, ema_state=ema_state,
                 masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
                 extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
-                    scalar_masker_bank)},
+                    scalar_masker_bank),
+                    "curriculum_rng_state": rng.get_state()},
                 device=device, artifact_type="latest")
             print(f"  [ckpt] saved to {ckpt_path}")
 
@@ -836,7 +850,8 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         health={}, ema_state=ema_state,
         masker_rng_state=masker.get_rng_state() if hasattr(masker, "get_rng_state") else None,
         extra={"scalar_masker_rng_state": collect_scalar_masker_bank_state(
-            scalar_masker_bank)},
+            scalar_masker_bank),
+            "curriculum_rng_state": rng.get_state()},
         device=device, artifact_type="final")
 
     report = {

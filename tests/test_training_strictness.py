@@ -97,6 +97,35 @@ def test_resume_restores_ema_state_and_reports_schedule_change(tmp_path, monkeyp
         "LR cosine schedule rebuilt from config)")
 
 
+def test_curriculum_rng_state_round_trips_through_checkpoints(tmp_path, monkeypatch, capsys):
+    """Audit B4: the private curriculum generator (mask ratio / scalar regime /
+    goal dropout) must be checkpointed and restored — otherwise a resumed run
+    silently restarts the sampling stream from the seed and diverges from an
+    uninterrupted run (Phase 3 MD §7/§8: mask RNG state is part of the resume
+    contract)."""
+    import train_unified
+    from train_unified import train
+
+    monkeypatch.setattr(train_unified, "REPO_ROOT", str(tmp_path))
+    cfg = _load_cfg()
+    train(cfg, use_synthetic_smoke=True, max_steps=3, device="cpu")
+    ckpt_path = os.path.join(str(tmp_path), "checkpoints", "unified", "final.pt")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    assert "curriculum_rng_state" in ckpt, (
+        "checkpoint must carry the curriculum RNG state")
+    assert torch.is_tensor(ckpt["curriculum_rng_state"]), (
+        f"curriculum_rng_state must be a tensor, got "
+        f"{type(ckpt['curriculum_rng_state'])!r}")
+    capsys.readouterr()  # drop run A output
+
+    train(cfg, resume_path=ckpt_path, use_synthetic_smoke=True, max_steps=5,
+          device="cpu")
+    out = capsys.readouterr().out
+    assert "curriculum RNG state restored" in out, (
+        "the resumed run must restore the checkpointed curriculum RNG state; "
+        f"captured:\n{out}")
+
+
 def test_scalar_masker_rng_evolves_across_batches():
     """Fix 3: scalar masking must use PERSISTENT RNG state — two mixed batches
     drawn from the SAME persistent bank must differ (RNG evolves), and the
