@@ -1,7 +1,21 @@
 # λ_phys sweep — plan (2026-09-13)
 
-Status: **planned, not started.** Stage 0 (the diagnosis that gates this plan) is running as
-kernel `anosvol/metasurface-jepa-192d-physics-goal-probe`.
+Status: **RUNNING** — kernel `anosvol/metasurface-jepa-192d-lambda-sweep` (v1), commit `3bd472a`.
+
+**Stage-0 gate: PASSED.** The goal-content probe on the physics-on checkpoint found the content
+signal alive at every stage (`c_physics` content ratio 1.320; after the linear projections
+1.141 / 1.010; `z_hat` 0.142 vs 0.100 presence; `occupancy_logits` 0.341 vs 0.253; 16.9 % of
+pixels flipped; real 0.2989 vs shuffled 0.5561), so the sweep is the right instrument —
+the "presence switch" characterisation came from the physics-OFF run and does not hold with
+physics on (`checkpoints/unified/REPORT.md` §10.2).
+
+Two amendments made before starting, both recorded in commits rather than here:
+
+- **Audit B27** (`3bd472a`) gave evaluation its own sample size (`eval.n_samples`, default 32,
+  CLI `--samples`, per-sample paired gate statistics). The gate had been decided on
+  `train.batch_size` = **2** samples; every arm would otherwise be scored by the same coin flip.
+- The `λ` grid is computed by the calibration pass at the head of the sweep kernel (§4), not
+  guessed.
 
 ## 1. The question the sweep answers
 
