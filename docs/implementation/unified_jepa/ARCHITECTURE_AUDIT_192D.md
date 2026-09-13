@@ -217,7 +217,164 @@ structural divergence would silently skip rather than raise.
 - Everything on the cloud has run on a P100 with a pinned torch 2.5.1; no other GPU or torch
   version has been exercised.
 
-## 8. Honest status
+## 8. Results analytics
+
+All numbers below are read from the run logs, not from memory; the extraction script and the
+resulting `analytics.json` are reproducible from the logs listed in each row.
+
+> **Read this first.** Every completed gate reading in §8.3 was produced with the **2-sample**
+> evaluation batch that audit B27 removed (it inherited `train.batch_size`). No run has yet been
+> scored by the 32-sample gate. The gate column is therefore an unstable estimator, and the
+> 8-sample probe in §8.6 points the opposite way on the same checkpoint. Nothing here is a verdict.
+
+### 8.1 Run inventory
+
+| run | kernel | commit | steps | wall | s/step | gate batch | notes |
+|---|---|---|---|---|---|---|---|
+| verification | `…-verify-run` v3 | `4deab8a` | 150 | 23 s | 0.153 | — | preflight only, no eval |
+| full | `…-full-run` v2 | `330f941` | 1,500 | 152 s | 0.101 | 2 | first gate reading |
+| long | `…-long-run` v5 | `0b69b23` | **20,000** | 1,846 s | 0.0923 | 2 | learning check, physics off |
+| physics | `…-physics-goal-probe` v1 | `f3f1244` | **10,000** | 1,292 s | **0.129** | 2 | physics ON + goal probe |
+| probe | `…-physics-probe` v1 | `6e6427d` | — | 31 s | — | — | soft/hard + gradient + census, no training |
+
+Fixed overhead per cloud session: **~4 min** torch pin install (the image ships torch 2.10 whose
+build cannot execute on the P100's sm_60). Physics costs **+40 %** per step (0.0923 → 0.129).
+
+### 8.2 Learning trajectories (easy stratum, first → last validation)
+
+| quantity | 1,500 (full) | 20,000 | 10,000 (physics ON) |
+|---|---|---|---|
+| `raw_mse` | 6.148 → 5.492 | 6.147 → **4.731** | 5.860 → **4.689** |
+| `raw_cos_err` | 1.000 → 0.989 | 1.000 → **0.859** | 0.999 → **0.882** |
+| `proj_mse` (= `L_inv`) | 1.422 → 2.923 | 1.420 → **4.153** | 1.416 → **4.695** |
+| `proj_cos_err` | 0.739 → 0.449 | 0.739 → 0.776 | 0.905 → 0.785 |
+| `L_var` | 0.585 → 0.246 | 0.585 → **0.045** | 0.604 → **0.054** |
+| `L_cov` | 12.87 → 91.48 | 12.86 → **145.77** | 9.11 → **172.43** |
+| `z_hat` norm | 9.22 → 9.85 | 9.22 → **5.91** | 9.76 → **6.96** |
+| `z_y` norm | 30.27 → 28.92 | 30.27 → 29.34 | 30.23 → 29.27 |
+
+Four things fall out of the table, all of them reproducible across runs:
+
+1. **The raw representation improves, then stops.** `raw_mse` −23 % and `raw_cos_err`
+   1.000 → 0.859 over 20k steps, but the trajectory plateaus at **~step 5,000** and does not move
+   for the remaining 15,000 (§9.2 of `REPORT.md`). 13× more steps bought nothing after the first
+   third.
+2. **The invariance loss in projector space gets *worse*, not better** — `L_inv` 1.42 → 4.15 —
+   while `raw_mse` improves. The two spaces diverge.
+3. **The covariance term runs away.** `L_cov` grows monotonically by ~11–19× in every run at
+   `λ_cov = 1`, against `λ_var = 25`. `L_var` falling 0.585 → 0.045 means the variance hinge is
+   being satisfied (per-feature std rising toward γ = 1) — and inflating variance is exactly what
+   inflates off-diagonal covariance, which the 25× weaker covariance weight cannot hold back. This
+   is a **quantified weight-imbalance signal**, recorded rather than tuned.
+4. **A scale gap opens between the branches.** `z_hat` shrinks 9.22 → 5.91 while the frozen
+   target's `z_y` stays at ~29.3. The predictor's output moves away from the target's scale.
+
+### 8.3 The gate, per run (all 2-sample — see the warning above)
+
+| run | scenario | real | null | shuffled | shuffled − real | gate |
+|---|---|---|---|---|---|---|
+| 20,000 (physics off) | **A** (hard) | 0.2046 | 0.7302 | 0.1889 | −0.0157 | **false** |
+| | B | 0.0935 | 0.3337 | 0.3330 | +0.2395 | true |
+| | C | 0.1388 | 0.2644 | 0.3609 | +0.2221 | true |
+| 10,000 (physics ON) | **A** (hard) | 0.5734 | 0.6080 | 0.4474 | −0.1260 | **false** |
+| | B | 0.0831 | 0.3085 | 0.5275 | +0.4444 | true |
+| | C | 0.1549 | 0.2947 | 0.3865 | +0.2316 | true |
+
+Scenario A fails in both, and its margin *moved by an order of magnitude* between runs
+(−0.0157 → −0.1260) on near-identical configurations — the signature of an estimator with almost
+no power. B and C hold large, stable margins throughout.
+
+### 8.4 Scalar dependence, collapse, and the retrieval baseline
+
+| metric | 20,000 | 10,000 (physics ON) |
+|---|---|---|
+| `scalar_dependence_one_known` (real / shuffled / gate) | 0.216466 / 0.218410 / **true** | 0.575882 / 0.576385 / **true** |
+| `scalar_dependence_two_known` | 0.236604 / 0.234370 / **false** | 0.272922 / 0.264590 / **false** |
+| predicted occupancy fraction | 0.3817 ± **0.1288** | 0.3728 ± **0.1348** |
+| (true fraction) | 0.3989 | 0.3989 |
+| nearest-neighbour baseline (mean / best) | 0.0744 / 0.0486 | 0.0744 / 0.0486 |
+
+- **The decoder un-collapsed.** At 1,500 steps the predicted occupancy fraction was
+  **0.5012 ± 0.0066** — near-constant and biased high. By 20k it is **0.3817 ± 0.1288** against a
+  true 0.3989: calibrated in the mean and *twenty times* more variable. The occupancy head works.
+- **The retrieval baseline is constant at 0.0744 across runs** — it does not depend on the trained
+  model, which is the expected sanity behaviour and confirms the number is comparable between runs.
+  Against it, the trained model's hard-stratum error (0.2046) is still ~2.7× worse.
+- Scalar dependence is marginal-to-passing in the one-known stratum and fails in the two-known one,
+  in both runs.
+
+### 8.5 Mask calibration (audit B20) — measured, and its tolerance
+
+| requested | achieved (training, mean) | Δ | validation stratum |
+|---|---|---|---|
+| 0.25 | 0.2462 | −1.5 % | 0.2695 (+7.8 %, i.e. **1.95 % absolute** — inside the ±2 % tolerance, at its edge) |
+| 0.50 | 0.5002 | +0.04 % | — |
+| 0.75 | 0.7582 | +1.1 % | — |
+| 1.00 | 1.0000 | 0 | 1.0000 |
+
+Calibration holds in training. The validation stratum's single draw sits at the edge of the
+tolerance, which is worth knowing before reading any small difference in stratum metrics.
+
+### 8.6 Physics path (probe kernel, real released surrogate, 6,328,698 params)
+
+| measurement | soft path (`use_ste=False`) | STE path (`use_ste=True`) |
+|---|---|---|
+| `L_phys` | **18.58** | 0.336 |
+| student params with gradient | **0** | **360** |
+| — encoder / predictor / decoder / scalar encoder | 0 / 0 / 0 / 0 | 72 / 210 / 14 / 17 |
+| surrogate / EMA params with gradient | 0 / 0 | 0 / 0 |
+
+Soft occupancy is **96.0 %** out of distribution for the surrogate (`spectrum_rel_diff` 0.9599,
+`ste_recommended` true). Degenerate-spectrum census: min per-sample std **0.4278** over 20,000
+train and **0.4298** over 17,488 val samples, **0 below** the `1e-3` guard — the guard is
+unreachable on this dataset.
+
+### 8.7 Goal-content analytics (physics ON, 10k steps, hard stratum, N = 8)
+
+Presence = real vs null; content = real vs a deranged spectrum. A content figure at or above the
+presence figure means the conditioning carries *which* goal, not merely *that* there is one.
+
+| stage | presence | content | content ÷ presence |
+|---|---|---|---|
+| `c_physics` (frozen encoder) | 1.000 | **1.320** | 1.32 |
+| after `c_phys_proj` / `goal_proj` | — | 1.141 / 1.010 | — |
+| `z_hat` | 0.100 | **0.142** | 1.41 |
+| `occupancy_logits` | 0.253 | **0.341** | 1.35 |
+| `binary_occupancy` | 0.561 | **0.615** | 1.10 |
+| pixels flipped | 14.1 % | **16.9 %** | 1.20 |
+| spectrum error | null 0.6124 | real **0.2989** vs shuffled **0.5561** | real 1.86× better |
+
+Content exceeds presence at **every** stage, and the deployed binary design moves more when the
+goal's content changes than when the goal is removed. This is the single strongest positive result
+in the project so far — and it is an 8-sample probe, not the gate.
+
+### 8.8 Guidance (CFG) analytics
+
+| run | w=0 | 0.5 | 1.0 | 2.0 | 3.0 | 5.0 |
+|---|---|---|---|---|---|---|
+| 20,000 (physics off) | 0.7302 | 0.3826 | **0.2046** | 8.68 | 9.55 | 9.39 |
+| 10,000 (physics ON) | 0.6080 | 0.4341 | **0.5734** | 0.671 | 0.599 | 0.405 |
+
+With physics off the curve was clean: `w = 0` (pure null) is 3.6× worse than `w = 1`, and
+extrapolating past `w = 1` diverges by ~45× — i.e. the real/null difference is not a meaningful
+direction to amplify, and **no guidance at `w = 1` was optimal**. With physics on the curve is
+non-monotonic noise, which is the 2-sample evaluation showing through rather than a change in the
+model. `w` was never exercised before audit B26 wired `cfg_forward` into the evaluator.
+
+### 8.9 EMA tracking
+
+| run | `ema` (74 tensors) | `scalar_mlp_ema` (18 tensors) |
+|---|---|---|
+| 20,000 (physics off) | 0.00091 | 0.00127 |
+| 10,000 (physics ON) | 0.00330 | 0.00800 |
+
+Both targets track their students to ≤ 0.8 % worst case. Also a consistency check on the run
+plumbing: the longer, physics-off run tracks *tighter* than the shorter physics-on one, as the EMA
+lag theory predicts.
+
+---
+
+## 9. Honest status
 
 The architecture is **coherent, wired end to end, and instrumented** — every stage from data
 loading to gate evaluation has been read line by line and exercised on real data with the
