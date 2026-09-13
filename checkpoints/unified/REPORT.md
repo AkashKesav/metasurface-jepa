@@ -303,21 +303,36 @@ Run before enabling `lambda_phys`, because the spec makes several checks precond
 
 ### 7.2 Broken or missing (must be addressed around activation)
 
-1. **The STE decision has never been verified against the real surrogate — and the config claims
-   it has.** `configs/unified.yaml` says `physics_use_ste: true  # ...verified by
-   soft_hard_occupancy_test`. In fact `surrogate_gradient_test` and `soft_hard_occupancy_test` are
-   invoked **only from `tests/test_phase4_physics.py`**, and those tests are `skipif`-gated on
-   `data/metadit/weights/surrogate_model.bin`, which the dev machine does not stage — so they
-   skip locally, and the Kaggle kernel runs preflight + training, never the test suite. The spec
-   forbids exactly this state: `04 §3` "Do not silently choose STE without the check";
-   `architecture_v5.md` §8.1.4 requires confirming the surrogate is sane on soft fields;
-   `04 §13` lists "surrogate gradient test passes" and "soft/hard occupancy behavior is
-   characterized" as pre-scaling gates. **Must be run with the real weights before activation.**
+1. **The STE decision has now been verified against the real surrogate — and it is
+   load-bearing.** This was the top pre-activation gap; it is closed by the probe kernel
+   `anosvol/metasurface-jepa-192d-physics-probe` (commit `6e6427d`, real released
+   `surrogate_model.bin`, 6,328,698 params, `requires_grad: false`). Measured on a real
+   validation batch (8 samples, hard stratum mask = 1.0):
+   - **Soft path (`use_ste=False`) is a silent dead end.** `L_phys` computes to **18.58** — a
+     perfectly plausible-looking number — while **`student_params_with_grad = 0`** (encoder 0,
+     predictor 0, decoder 0, scalar encoder 0). Every gradient is zero.
+   - **STE path (`use_ste=True`) works.** `L_phys = 0.336`, **360 student params with gradients**
+     (encoder 72, predictor 210, decoder 14, scalar encoder 17), with **0** on the surrogate and
+     **0** on both EMA targets.
+   - **Soft occupancy is dramatically out-of-distribution for the surrogate:**
+     `spectrum_rel_diff = 0.9599` (96 % relative difference between the soft and hard-forward
+     surrogate outputs), `surrogate_out_of_distribution = true`, `ste_recommended = true`.
+
+   So `physics_use_ste: true` is not a preference — with it off, physics would contribute
+   *nothing* while reporting a healthy loss. This is precisely the failure `04 §3`'s
+   "Do not silently choose STE without the check" exists to prevent, and it also explains the
+   18.58-vs-0.336 loss gap: the soft field drives the surrogate into a degenerate regime.
+   **Consequence to fix:** nothing currently refuses the combination
+   `lambda_phys > 0` **and** `physics_use_ste: false` — a configuration that would silently make
+   the physics term a no-op. The B18 guard covers only `hard_forward=True`, not the plain soft
+   path. (`use_ste=False, hard_forward=False, training=True` takes the bare `else` branch in
+   `decode_geometry` with no assertion.) Recorded as the next defect to fix.
 2. **Nothing asserts the physics term actually reaches the student.** The preflight counts student
    parameters that received gradient, but those gradients also come from
    `L_inv/L_var/L_cov/L_occ` — a physics path with a dead Jacobian would pass the ownership check
-   unnoticed. The invariant to assert is narrower: *with physics active, some student parameter's
-   gradient changes when `lambda_phys` goes 0 → >0.*
+   unnoticed. The probe's `Q2` measurement above is exactly the missing assertion, and the
+   instrument (`surrogate_gradient_test`, and a stricter per-term variant) exists but is never
+   called by the pipeline. **Fix: run this as part of the preflight when `lambda_phys > 0`.**
 3. **The spec's spectrum-sensitivity probe is not implemented.** `architecture_v5.md` §8.3:
    "Test by perturbing the target spectrum slightly with everything else fixed and confirming the
    decoded design changes proportionally". The evaluator's `diversity_check` defaults to
@@ -332,10 +347,11 @@ Run before enabling `lambda_phys`, because the spec makes several checks precond
 5. **`PhysicsSpectrumLoss` is inert dead code.** `_enabled` is never set (`enable()` has no
    callers), so the inactive branch always returns a zero tensor — a placeholder that reads like a
    real fallback.
-6. **Degenerate-spectrum crash risk, never exercised on real data.** The B18 guard raises
-   `RuntimeError` when any sample's spectrum std `< 1e-3`. With physics active this runs every
-   step against the real splits, which the dev machine cannot load. If any real sample trips it,
-   the run dies mid-training. Cheap to measure on the cloud before committing to a long run.
+6. **Degenerate-spectrum crash risk: retired by measurement.** The B18 guard raises when any
+   sample's spectrum std `< 1e-3`. The census run in the same probe kernel over **20,000 training
+   and 17,488 validation samples** found `std_min = 0.4278` (train) / `0.4298` (val) and **zero**
+   samples below `1e-3` — a ~430× margin at the observed minimum. The guard will not fire on this
+   dataset.
 
 ### 7.4 What the negative result most plausibly means (hypothesis, not conclusion)
 
