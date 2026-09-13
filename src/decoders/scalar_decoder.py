@@ -13,13 +13,16 @@ from torch import nn
 class ScalarDecoder(nn.Module):
     """Decode the hidden-D scalar-summary query prediction into (l, h, r).
 
-    Each scalar gets its own small MLP head. Final layer uses the default
-    PyTorch init (Kaiming-uniform) rather than zero-init: the scalar outputs
-    feed directly into assemble_metadit_geometry → surrogate, so zero scalars
-    at init produce all-zero geometry and the surrogate's ReLU6 activations are
-    in a dead zone (zero Jacobian), killing gradient flow through the entire
-    student encoder. Non-zero init ensures a non-zero geometry for the surrogate
-    to produce a non-trivial Jacobian (Phase 4 MD §3: "NO zero-init on this one").
+    Each scalar gets its own small MLP head. Initialization is deliberately
+    NON-ZERO at the output: the final weight is zero-initialized (the head
+    starts as a constant predictor) and the final bias is set to the dataset
+    means, so at step 0 each head predicts its mean scalar — a non-zero,
+    in-distribution geometry for the frozen surrogate. A fully zero-initialized
+    head would emit all-zero scalars, collapsing the geometry and leaving the
+    surrogate's ReLU6 activations in a dead zone (zero Jacobian), which would
+    kill gradient flow through the student encoder (Phase 4 MD §3: "NO
+    zero-init on this one"). Audit B15: the previous docstring claimed a
+    "default Kaiming-uniform final layer", which the code never did.
     """
 
     def __init__(self, hidden=192, mlp_hidden=64, n_scalars=3):

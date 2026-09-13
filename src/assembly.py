@@ -297,8 +297,11 @@ class UnifiedJEPA(nn.Module):
         scalar_query = self.scalar_query_token.expand(b, -1, -1)  # (B, 1, hidden)
         queries = torch.cat([occ_queries, scalar_query], dim=1)    # (B, 257, hidden)
 
-        # 7. Predictor (c_physics 384→192 via c_phys_proj)
-        z_hat_raw, _ = self.predictor(queries, fused, c_physics)  # (B, 257, hidden)
+        # 7. Predictor (c_physics 384→192 via c_phys_proj; audit B16: need_attn
+        #    returns the per-block cross-attention weights instead of being
+        #    silently ignored)
+        z_hat_raw, attn_weights = self.predictor(
+            queries, fused, c_physics, need_weights=need_attn)  # (B, 257, hidden)
 
         # 8. Split predictions
         occupancy_pred = z_hat_raw[:, :256, :]         # (B, 256, hidden)
@@ -318,6 +321,7 @@ class UnifiedJEPA(nn.Module):
             a_goal=a_goal,
             scalar_pred=scalar_pred,
             scalar_summary_pred=scalar_summary_pred,
+            attn_weights=(attn_weights if need_attn else None),
         )
 
         if with_target:
@@ -331,6 +335,11 @@ class UnifiedJEPA(nn.Module):
                 film_params_ema, _ = self.scalar_mlp_ema(true_input)
                 z_y_raw = self.ema(occupancy, film_params=film_params_ema)
                 out["z_y_raw"] = z_y_raw
+                # Explicit feature-wise normalization boundary (documented
+                # contract, audit B15): the active UnifiedJEPALoss consumes
+                # z_y_raw through its own objective-owned projector, so this
+                # export is currently unused inside the repo — it exists as the
+                # declared boundary, not as a consumed input.
                 out["z_y_normalized"] = F.layer_norm(
                     z_y_raw, (z_y_raw.shape[-1],)
                 )
@@ -413,8 +422,15 @@ class UnifiedJEPA(nn.Module):
                          soft-vs-hard diagnostic — see physics_loop).
 
         Returns:
-            geometry:    [B, 3, 64, 64] — r_atom/5, h_atom, l_lattice/3.
-            soft_occ:    [B, 1, 64, 64] — sigmoid occupancy logits.
+            geometry:     [B, 3, 64, 64] — r_atom/5, h_atom, l_lattice/3.
+            occ_delivered: [B, 1, 64, 64] — the occupancy actually handed to
+                          the assembler: raw sigmoid (default), STE
+                          hard-forward/soft-backward (use_ste, training only),
+                          or hard-thresholded (hard_forward), with visible
+                          pixels retained from occ_input where supplied. This
+                          is NOT the raw probability — use
+                          decode_occupancy_prob for occupancy diagnostics
+                          (audit B7).
         """
         # Effective scalar rule (architecture_v5.md §4.1): decode-time FiLM and
         # assembly use the true value where known, the prediction where unknown —

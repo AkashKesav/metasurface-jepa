@@ -438,6 +438,25 @@ def test_old_checkpoint_not_compatible():
         load_into_model(unified, old_sd, torch.device("cpu"), strict=True)
 
 
+def test_need_attn_returns_predictor_attention_weights():
+    """Audit B16: need_attn=True must return the predictor's per-block
+    cross-attention weights — the parameter was accepted and silently ignored,
+    so callers asking for weights got nothing."""
+    model = build_model(predictor_depth=4, geo_depth=2)
+    occ, sv, sk, spec, M = _batch(seed=2)
+    with torch.no_grad():
+        out = model(occ, sv, sk, spec, M, need_attn=True)
+    weights = out.get("attn_weights")
+    assert weights is not None, "need_attn=True must return attention weights"
+    assert isinstance(weights, list) and len(weights) == 4, type(weights)
+    # (B, heads, 257 queries, 273 kv) — 6 heads, 256 occ + 1 scalar query.
+    assert tuple(weights[-1].shape) == (2, 6, 257, 273), weights[-1].shape
+    with torch.no_grad():
+        no_attn = model(occ, sv, sk, spec, M, need_attn=False)
+    assert no_attn["attn_weights"] is None, (
+        "need_attn=False must not build attention-weight tensors")
+
+
 def test_set_spectrum_path_freezes_released_encoder(tmp_path):
     """Audit B1: attaching the released encoder must freeze it.
 
