@@ -128,6 +128,59 @@ def test_guidance_gap_does_not_mutate_model_mode():
     assert model.training == was_training
 
 
+def test_guidance_gap_sweep_loader_mirrors_the_evaluator():
+    """Audit B23: the §20.3 sweep must load a checkpoint the way the authoritative
+    evaluator does — strict model state plus the EMA target state — and NOT via
+    ``train.engine.load_checkpoint``. That is the TRAINING resume API: it requires
+    an objective/optimizer/scheduler and has no ``strict_model`` argument, so the
+    sweep's call raised
+
+      TypeError: load_checkpoint() got an unexpected keyword argument 'strict_model'
+
+    and the sweep never ran at all on the GPU session. Nothing caught it locally
+    because the sweep is only exercised with a real checkpoint on a real device.
+
+    The runner in this file invokes tests with no arguments, so the checkpoint is
+    written to a TemporaryDirectory rather than via a tmp_path fixture.
+    """
+    import importlib.util
+    import tempfile
+
+    from assembly import saveable_state_dict
+    from train.engine import collect_ema_state
+
+    sweep_path = os.path.join(REPO_ROOT, "scripts", "diagnostics",
+                              "run_guidance_gap_sweep.py")
+    spec = importlib.util.spec_from_file_location("_gg_sweep", sweep_path)
+    sweep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+    assert hasattr(sweep, "load_eval_model"), (
+        "the sweep must expose the evaluator-style loader (audit B23)")
+
+    trained = _build_model()
+    with torch.no_grad():  # perturb so "restored" is distinguishable from "untouched"
+        for p in trained.parameters():
+            p.add_(0.01)
+    ckpt = {"model": saveable_state_dict(trained),
+            "ema_state": collect_ema_state(trained)}
+
+    fresh = _build_model()  # same manual_seed(0) → identical init
+    before = {k: v.clone() for k, v in fresh.state_dict().items()}
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "ckpt.pt")
+        torch.save(ckpt, path)
+        sweep.load_eval_model(fresh, path, "cpu")
+
+    after = fresh.state_dict()
+    for k, v in ckpt["model"].items():
+        assert k in after, f"{k} missing from the model after load"
+        assert torch.allclose(after[k].float(), v.float(), atol=1e-6), (
+            f"{k} was not restored from the checkpoint")
+    changed = sum(1 for k in ckpt["model"] if not torch.equal(before[k], after[k]))
+    assert changed > 0, "no weight changed — the loader restored nothing"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -27,6 +27,28 @@ from data.mask import BlockMasker
 from assembly import build_unified_model
 
 
+def load_eval_model(model, ckpt_path, device):
+    """Load a training checkpoint into an eval model.
+
+    Mirrors the authoritative evaluator (``eval_scenarios._load_eval``): the model
+    state dict strictly, plus the EMA target state the guidance gap depends on
+    (the predictor is FiLM-conditioned by ``scalar_mlp_ema``).
+
+    ``train.engine.load_checkpoint`` is the TRAINING resume path — it requires an
+    objective/optimizer/scheduler and has no ``strict_model`` argument, so calling
+    it here raised
+      TypeError: load_checkpoint() got an unexpected keyword argument 'strict_model'
+    and the §20.3 sweep never ran at all (audit B23).
+    """
+    from assembly import load_into_model
+    from train.engine import restore_ema_state
+
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    load_into_model(model, ckpt["model"], device=device, strict=True)
+    restore_ema_state(model, ckpt.get("ema_state", {}))
+    return ckpt
+
+
 def main():
     parser = argparse.ArgumentParser(description="Guidance gap sweep (§20.3)")
     parser.add_argument("--config", type=str, required=True)
@@ -44,9 +66,7 @@ def main():
     model.eval()
 
     if args.checkpoint and os.path.exists(args.checkpoint):
-        from train.engine import load_checkpoint
-        load_checkpoint(args.checkpoint, model, None, None, None, device,
-                        strict_model=True, strict_objective=False)
+        load_eval_model(model, args.checkpoint, device)
         print(f"Loaded checkpoint from {args.checkpoint}")
 
     # Synthetic test data
