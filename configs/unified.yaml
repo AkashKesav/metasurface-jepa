@@ -36,6 +36,25 @@ loss:
   lambda_occ: 1.0       # occupancy BCEWithLogits on masked pixels (§4.1,
                         # operator decision 2026-09-13: the decoder must be
                         # supervised even while lambda_phys = 0)
+  lambda_summary: 1.0   # DOOR (a) OF THE SCALAR INVESTIGATION (operator decision
+                        # 2026-09-13: "first a then b"). Weight of the read-out that
+                        # reconstructs the KNOWN scalars from the scalar encoder's
+                        # summary token. That token had no objective of its own, so
+                        # nothing pushed it to carry the conditioning — measured
+                        # (REPORT.md §17/§19/§20): it varies ~11% with the scalars,
+                        # the predictor attends it 93.6x uniform, yet scalar_pred
+                        # moves 0.000145 against 0.246 for a spectrum perturbation,
+                        # and L_scalar delivers 0.0036 of gradient to the scalar
+                        # encoder against 0.6932 to the decoder. Scaling the token
+                        # 100x did NOT fix it, which ruled out magnitude. This term
+                        # adds a gradient path to the encoder that does not run
+                        # through the predictor.
+                        # PRE-REGISTERED SUCCESS TEST (fixed before the run): the
+                        # encoder's gradient share rises materially AND the scalar
+                        # win rates move off ~0.5 (one-known measured 0.5004 over
+                        # 17,488 samples) toward the scenario gates' 0.94-0.97. If
+                        # the gradient rises but the gates do not, door (b) is
+                        # warranted — the read-out is not the bottleneck.
   lambda_phys: 3.32     # physics loss WEIGHT, set from the calibrated sweep of
                         # 2026-09-13 (checkpoints/unified/REPORT.md §11). Five arms
                         # at 10k steps each, scored by the 32-sample gate:

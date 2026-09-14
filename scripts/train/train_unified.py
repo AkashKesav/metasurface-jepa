@@ -102,7 +102,7 @@ def _validate_config(cfg):
     staging_phase = str(cfg.get("staging", {}).get("phase", "")).upper()
     lambda_phys = float(cfg.get("loss", {}).get("lambda_phys", 0.0))
     for key in ("lambda_inv", "lambda_var", "lambda_cov", "lambda_scalar",
-                "lambda_occ", "lambda_phys"):
+                "lambda_occ", "lambda_phys", "lambda_summary"):
         val = cfg.get("loss", {}).get(key)
         if val is not None and float(val) < 0:
             raise ValueError(f"loss.{key} must be >= 0, got {val}")
@@ -798,6 +798,10 @@ def train(cfg, resume_path=None, no_train=False, device=None,
         lambda_cov=loss_cfg.get("lambda_cov", 1.0),
         lambda_scalar=loss_cfg.get("lambda_scalar", 1.0),
         lambda_phys=lambda_phys,
+        # Door (a) of the scalar investigation (operator decision 2026-09-13):
+        # weight of the summary-token read-out, which gives the scalar encoder a
+        # gradient path that does not run through the predictor.
+        lambda_summary=loss_cfg.get("lambda_summary", 0.0),
         gamma=loss_cfg.get("gamma", 1.0),
         eps=loss_cfg.get("eps", 1e-4),
         # Audit B17: the Huber branch was unreachable — the config key was
@@ -1234,6 +1238,11 @@ def preflight(cfg, device=None):
         lambda_var=cfg.get("loss", {}).get("lambda_var", 25.0),
         lambda_cov=cfg.get("loss", {}).get("lambda_cov", 1.0),
         lambda_scalar=cfg.get("loss", {}).get("lambda_scalar", 1.0),
+        # The preflight must mirror the TRAINING objective, or it validates a
+        # different function than the one that will run. lambda_occ was missing
+        # here (fixed alongside door (a)).
+        lambda_occ=cfg.get("loss", {}).get("lambda_occ", 0.0),
+        lambda_summary=cfg.get("loss", {}).get("lambda_summary", 0.0),
         lambda_phys=max(cfg.get("loss", {}).get("lambda_phys", 0.0), 1.0),
         surrogate=surrogate,
         physics_use_ste=cfg.get("staging", {}).get("physics_use_ste", True),

@@ -329,6 +329,11 @@ class UnifiedJEPA(nn.Module):
             scalar_pred=scalar_pred,
             scalar_summary_pred=scalar_summary_pred,
             attn_weights=(attn_weights if need_attn else None),
+            # The scalar encoder's pooled conditioning token, exposed so the
+            # objective can attach its own read-out to it (door (a) of the scalar
+            # investigation): the token had no objective of its own, so nothing
+            # pushed it to carry the scalars.
+            scalar_summary=scalar_summary,
         )
 
         if with_target:

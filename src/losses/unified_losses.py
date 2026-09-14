@@ -54,6 +54,41 @@ class ScalarPredictionLoss(nn.Module):
         return err.sum() / n_unknown
 
 
+class SummaryScalarReadout(nn.Module):
+    """Auxiliary read-out on the scalar-summary token (door (a) of the scalar
+    investigation, operator decision 2026-09-13).
+
+    The scalar encoder produces a pooled summary token that the fusion encoder
+    hands to the predictor as a key/value entry. That token had **no objective of
+    its own** — it is a pure intermediate — so nothing pushed it to carry the
+    conditioning. Measured consequences (REPORT.md §17, §19, §20): the token varies
+    by only ~11 % when the scalars change, the predictor attends to it at 34 % of
+    the scalar query's attention (93.6x uniform), yet `scalar_pred` moves 0.000145
+    under a scalar perturbation against 0.246 under a spectrum perturbation; and
+    `L_scalar` delivers 0.0036 of gradient to the scalar encoder against 0.6932 to
+    the scalar decoder. Scaling the token 100x at inference did not fix it (§20.1),
+    which ruled out magnitude as the binding constraint.
+
+    Reconstructing the KNOWN scalar values from the token gives the encoder a short,
+    direct gradient — the only path from a scalar objective to the encoder that does
+    not run through the predictor. It is scored only where a scalar is KNOWN: where
+    the input was zeroed there is nothing to recover, and the head never sees the raw
+    values, so it cannot learn to copy them.
+    """
+
+    def __init__(self, hidden=192):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 3),
+        )
+
+    def forward(self, summary_token):
+        """summary_token: (B, 1, hidden) -> (B, 3) known-scalar estimates."""
+        return self.net(summary_token.squeeze(1))
+
+
 class UnifiedJEPALoss(nn.Module):
     """Combined JEPA + VICReg + scalar + (optional) physics objective.
 
@@ -78,13 +113,14 @@ class UnifiedJEPALoss(nn.Module):
     """
 
     name = "unified_jepa"
-    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys")
+    term_names = ("L_inv", "L_var", "L_cov", "L_scalar", "L_occ", "L_phys",
+                  "L_summary")
 
     def __init__(self, hidden=192, lambda_inv=25.0, lambda_var=25.0,
                  lambda_cov=1.0, lambda_scalar=1.0, lambda_phys=0.0,
                  lambda_occ=0.0,
                  gamma=1.0, eps=1e-4, scalar_loss_type="l1",
-                 surrogate=None, physics_use_ste=True):
+                 surrogate=None, physics_use_ste=True, lambda_summary=0.0):
         super().__init__()
         self.projector = VICRegProjector(
             input_dim=hidden, hidden_dim=hidden, output_dim=hidden,
@@ -104,12 +140,16 @@ class UnifiedJEPALoss(nn.Module):
         # empirical default; set physics_use_ste=False only after re-running
         # that check on a surrogate that accepts soft input.
         self.physics_use_ste = physics_use_ste
+        # Door (a): weight of the summary-token read-out. 0.0 keeps the shipped
+        # behaviour bit-identical (the term is then exactly zero).
+        self.lambda_summary = lambda_summary
 
         # Fix 6 (spec §8): self.occupancy_loss removed — it was constructed
         # but never called; forward() computes the projected JEPA/VICReg
         # terms inline via the shared objective-owned projector. Keeping an
         # unused module here would be dead, misleading code.
         self.scalar_loss = ScalarPredictionLoss(loss_type=scalar_loss_type)
+        self.summary_readout = SummaryScalarReadout(hidden=hidden)
 
     def forward(self, model, occupancy, scalar_values, scalar_known,
                 spectrum, mask, goal_mode="real"):
@@ -191,10 +231,22 @@ class UnifiedJEPALoss(nn.Module):
         else:
             L_occ = torch.zeros((), device=z_hat.device)
 
+        # Door (a): reconstruct the KNOWN scalars from the summary token, so the
+        # scalar encoder is trained to make that token carry the conditioning.
+        # Scored on known positions only: unknown values were zeroed before the
+        # encoder saw them, so there is nothing to recover there.
+        if self.lambda_summary > 0 and scalar_known.any():
+            readout = self.summary_readout(out["scalar_summary"])
+            summary_err = (readout - scalar_values).abs() * scalar_known.float()
+            L_summary = summary_err.sum() / scalar_known.sum().clamp(min=1)
+        else:
+            L_summary = torch.zeros((), device=z_hat.device)
+
         total = (L_inv_w + L_var_w + L_cov_w
                  + self.lambda_scalar * L_scalar
                  + self.lambda_occ * L_occ
-                 + self.lambda_phys * L_phys)
+                 + self.lambda_phys * L_phys
+                 + self.lambda_summary * L_summary)
 
         out["loss_components"] = {
             "L_inv": float(L_inv.detach()), "L_var": float(L_var.detach()),
@@ -206,6 +258,8 @@ class UnifiedJEPALoss(nn.Module):
             "L_cov_weighted": float(L_cov_w.detach()),
             "L_occ_weighted": float((self.lambda_occ * L_occ).detach()),
             "L_phys_weighted": float((self.lambda_phys * L_phys).detach()),
+            "L_summary": float(L_summary.detach()),
+            "L_summary_weighted": float((self.lambda_summary * L_summary).detach()),
             "L_total": float(total.detach()),
         }
         return {

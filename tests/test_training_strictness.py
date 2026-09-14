@@ -1024,11 +1024,19 @@ def test_frozen_surrogate_not_in_optimizer():
         f"optimizer fingerprints must match with/without frozen surrogate: "
         f"{fp_b} vs {fp_c}")
 
-    # Objective trainable group = projector parameters only.
-    proj_param_ids = {id(p) for p in obj_c.projector.parameters()}
+    # Objective trainable group = the objective's trainable parameters, and
+    # nothing else. This used to be written as "exactly the projector", which
+    # silently assumed the projector was the objective's ONLY trainable module.
+    # Door (a) (2026-09-13) added the summary-token read-out to the objective, so
+    # the assertion is now stated as the property that actually has to hold: every
+    # trainable objective parameter is optimised, and no frozen one is.
+    obj_trainable_ids = {id(p) for p in obj_c.parameters() if p.requires_grad}
     obj_group_ids = {id(p) for g in opt_c.param_groups for p in g["params"]}
-    assert obj_group_ids == proj_param_ids, (
-        "objective optimizer group must be exactly the projector parameters")
+    assert obj_group_ids == obj_trainable_ids, (
+        "objective optimizer group must be exactly the objective's trainable "
+        "parameters (projector + summary read-out)")
+    assert {id(p) for p in obj_c.projector.parameters()} <= obj_group_ids, (
+        "the projector must be optimised")
 
     # 3. Surrogate still receives no parameter gradients.
     assert all(p.requires_grad is False for p in surr.parameters()), (

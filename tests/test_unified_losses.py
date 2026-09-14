@@ -469,6 +469,82 @@ def test_jepa_loss_on_masked_only():
     assert torch.equal(out["mask"], expected_mask)
 
 
+def test_summary_readout_is_in_the_objective_state():
+    """Door (a) of the scalar investigation: the read-out is a real submodule, so
+    checkpoints carry it and a resume restores a trained read-out rather than
+    silently re-initialising it."""
+    objective = UnifiedJEPALoss(hidden=192, lambda_summary=1.0)
+    keys = [k for k in objective.state_dict() if k.startswith("summary_readout.")]
+    assert keys, "the summary read-out must be part of the objective's state_dict"
+    assert any(k.endswith("weight") for k in keys)
+
+
+def test_summary_readout_term_is_exactly_zero_when_disabled():
+    """lambda_summary = 0 keeps the shipped behaviour identical: the term is an
+    exact zero, not a small number."""
+    model = _build_model()
+    objective = UnifiedJEPALoss(hidden=192, lambda_summary=0.0)
+    objective.train()
+    occ, sv, spec, M = _batch(seed=3)
+    sk = torch.ones(2, 3, dtype=torch.bool)
+    out = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+    assert out["components"]["L_summary"] == 0.0
+    assert out["components"]["L_summary_weighted"] == 0.0
+
+
+def test_summary_readout_term_is_zero_without_known_scalars():
+    """Nothing to recover where every scalar was zeroed before the encoder saw
+    it — the all-unknown regime must not invent a supervision signal."""
+    model = _build_model()
+    objective = UnifiedJEPALoss(hidden=192, lambda_summary=1.0)
+    objective.train()
+    occ, sv, spec, M = _batch(seed=3)
+    sk = torch.zeros(2, 3, dtype=torch.bool)
+    out = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+    assert out["components"]["L_summary"] == 0.0
+
+
+def test_summary_readout_gives_the_scalar_encoder_a_path_that_bypasses_the_predictor():
+    """THE mechanism door (a) exists for.
+
+    The summary token had no objective of its own, so the only route from a scalar
+    objective to the scalar encoder ran through the predictor's attention —
+    measured at 0.0036 of gradient against the scalar decoder's 0.6932, while the
+    token itself varied only ~11% with the scalars. The read-out must deliver
+    gradient to the scalar encoder WITHOUT touching the predictor; that is what
+    makes this a new path rather than a louder version of the existing one.
+    """
+    model = _build_model()
+    objective = UnifiedJEPALoss(hidden=192, lambda_summary=1.0)
+    objective.train()
+    occ, sv, spec, M = _batch(seed=3)
+    sk = torch.zeros(2, 3, dtype=torch.bool)
+    sk[:, 0] = True                       # one known scalar to recover
+
+    out = model(occ, sv, sk, spec, M, goal_mode="real")
+    assert "scalar_summary" in out, (
+        "the model must expose the scalar encoder's summary token, or the "
+        "objective cannot attach a read-out to it")
+    readout = objective.summary_readout(out["scalar_summary"])
+    assert readout.shape == (2, 3)
+    L = ((readout - sv).abs() * sk.float()).sum() / sk.sum().clamp(min=1)
+
+    model.zero_grad(set_to_none=True)
+    objective.zero_grad(set_to_none=True)
+    L.backward()
+
+    enc = sum(float(p.grad.abs().sum()) for p in model.scalar_encoder.parameters()
+              if p.grad is not None)
+    pred = sum(float(p.grad.abs().sum()) for p in model.predictor.parameters()
+               if p.grad is not None)
+    assert enc > 0.0, (
+        "the read-out must deliver gradient to the scalar encoder — that is the "
+        "point of door (a)")
+    assert pred == 0.0, (
+        "the read-out's gradient must NOT pass through the predictor; if it did, "
+        f"this would be the existing path rather than a new one (got {pred})")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
