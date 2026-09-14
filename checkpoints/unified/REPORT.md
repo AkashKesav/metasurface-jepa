@@ -1270,3 +1270,71 @@ spectrum std) predicted them was looking at the wrong property: the predictor is
 **Practical consequence:** an out-of-distribution check at inference — nearest-training-spectrum
 distance — would flag exactly these cases rather than silently emitting an unusable design. That is
 a read-out guard, not a training change.
+
+
+---
+
+## 21. Door (a) result: the read-out works as designed, and moves the scalar gates off chance
+
+Kernel `anosvol/metasurface-jepa-192d-door-a` v2, commit `f858b75`, `exit=0`, all 13 stages
+green; 10,000 steps in 1245 s at `lambda_phys = 3.32`, `lambda_summary = 1.0`.
+
+### 21.1 The mechanism is exactly as designed
+
+Gradient delivered to each module by the read-out ALONE, on the trained model with a real batch:
+
+| term | occupancy_encoder | **scalar_encoder** | fusion | predictor | occ_decoder | scalar_decoder |
+|---|---|---|---|---|---|---|
+| `L_scalar` | 0.01774 | **0.04174** | 0.03532 | 0.45629 | 0.0 | 4.06072 |
+| **`L_summary`** | **0.0** | **0.17418** | **0.0** | **0.0** | **0.0** | **0.0** |
+
+The read-out touches the scalar encoder and **nothing else** — zero gradient to the predictor,
+confirmed on the real trained model rather than only in a unit test. It delivers **4.2x** what the
+scalar loss itself delivers to that encoder (0.17418 against 0.04174), from a single auxiliary head.
+Its weighted share of the global gradient is small (0.69 %), so it shapes the encoder without
+re-weighting the objective.
+
+Setup diagnostics, all as required: `z_hat_requires_grad` true, `scalar_summary_requires_grad` true,
+`projector_trainable` 9, `model_trainable` 377, `n_masked_tokens` 512/512.
+
+**Probe bug recorded, not hidden:** my `L_occ` row reads `value 0.0 / grad_fn None`, so
+`L_occ` is missing from the weighted shares and the other six shares are inflated by its absence.
+Cause: the probe compared the RAW mask (1 = visible) against the occupancy instead of the
+objective's `o["mask"]` (the loss mask), so at mask ratio 1.0 the selection was empty and fell to
+the zero fallback. The model's own `L_occ` is unaffected — this is a defect in the *instrument*.
+It also explains the previous run's `does not have a grad_fn` failure: the traceback pointed at the
+backward inside the loop, which is the same line for every term, and the failing term was this one.
+
+### 21.2 The pre-registered criterion: passed on both halves
+
+Full validation split, 17,488 samples, hard stratum (mask 1.0), each stratum against the
+same-schedule baseline from the sweep (`lambda_phys = 3.32`, 10k steps, no door (a)):
+
+| stratum | door (a) OFF | **door (a) ON** | change | 95 % CI (ON) |
+|---|---|---|---|---|
+| one known | 0.5004 (chance) | **0.63895** | **+0.1386** | [0.63154, 0.64636] |
+| two known | 0.5106 | **0.56908** | **+0.0585** | [0.56167, 0.57649] |
+
+Both intervals sit far from 0.5, and the one-known shift is ~26 standard errors from its baseline.
+The pre-registered test was "the encoder's gradient share rises materially **and** the scalar win
+rates move off ~0.5 toward the scenario gates' 0.94-0.97". **The first half is met exactly. The
+second is met only partly:** the scalar win rates moved decisively off chance, but they did **not**
+reach the scenario gates' level.
+
+### 21.3 Verdict, and what it means for door (b)
+
+- **Door (a) is a real mechanism, not a placebo.** It does precisely what it was built to do, and
+  the deployed design became measurably scalar-dependent on 17,488 samples where it previously was
+  not distinguishable from a coin flip.
+- **The scalar gates still FAIL** at the operator-set 0.75 bar: 0.639 and 0.569. `scenario A/B/C`
+  are unaffected (A 0.96875 at n=32).
+- The pre-registered rule said "(b) is warranted if the gradient rises but the gates do not". Here
+  the gradient rose **and** the gates moved — but they did not clear the bar. So the rule's binary
+  does not settle it: this is a partial success, and the honest reading is that the read-out fixed
+  *the encoder's training signal* while the barrier to a scalar-dependent *design* lies further
+  downstream.
+- One open question that must be settled before attributing the residual gap to architecture: this
+  run is **10k steps**, while the 70k full epoch is the shipped model. `(a) at one full epoch` has
+  not been measured. The 10k baseline was itself at chance (0.5004/0.5106 on the 70k model; the
+  sweep's 10k arms showed real-vs-shuffled differences of ~0.0002), so the door-(a) gain is not a
+  schedule artefact — but whether another 60k steps closes more of the gap is unknown.
