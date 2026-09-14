@@ -1070,6 +1070,12 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                   f"L_cov={c['L_cov']:.4f} L_scalar={c['L_scalar']:.4f} "
                   f"L_phys={c['L_phys']:.4f} "
                   f"L_phys_w={c['L_phys_weighted']:.4f} "
+                  # Door (a): the summary-token read-out. Without this on the log
+                  # line the mechanism is invisible during training — the first
+                  # door-(a) run had to be diagnosed from the checkpoint because
+                  # the term never appeared in the step log.
+                  f"L_summary={c['L_summary']:.4f} "
+                  f"L_summary_w={c['L_summary_weighted']:.4f} "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
 
         if step % val_every == 0 and step > 0:
