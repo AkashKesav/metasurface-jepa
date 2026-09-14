@@ -1154,3 +1154,53 @@ pass, scalar one-known 0.4375 fail, two-known 0.59375 pass), so the new probe is
 about the earlier readings moved.
 
 **Remaining spec gaps: none.** Every §8.1/§8.3 check now has an implementation and a measurement.
+
+---
+
+## 19. The scalar path is weak, not dead — correcting §17 (2026-09-13)
+
+§17 concluded that "the scalar-summary → predictor path is effectively dead". Kernel
+`anosvol/metasurface-jepa-192d-attn-probe` (v3), commit `15c8d30`, `exit=0`, measures the
+mechanism directly and **that conclusion was wrong.**
+
+### 19.1 The predictor DOES attend to the scalar summary — heavily
+
+The predictor's cross-attention is available via `need_attn=True` as per-block
+`(B, H, T_q=257, T_kv=273)` weights, so the scalar query's attention over the KV can be read off
+exactly. Mean mass per KV group, 8 blocks:
+
+| | occupancy (0–255) | goal (256–271) | **scalar summary (272)** |
+|---|---|---|---|
+| uniform reference | 0.9377 | 0.0586 | 0.0037 |
+| **scalar query** | 0.6226 | 0.0346 | **0.3428** |
+| occupancy queries (mean) | 0.6244 | 0.0009 | 0.3747 |
+| scalar query ÷ uniform | 0.66× | 0.59× | **93.6×** |
+
+The scalar-summary token receives **34 % of the scalar query's attention — 93.6× its uniform
+share.** It is not ignored; it is the single most over-attended token in the KV. §17's phrase
+"effectively dead" is not supported.
+
+### 19.2 What is actually wrong: the token is tiny and its encoder is barely trained
+
+Two measurements explain the attenuated effect without any dead path:
+
+- **Magnitude.** The scalar-summary token's norm is **1.1679** against `z_x`'s **26.5802** — the
+  summary is **4.4 %** of the occupancy tokens' magnitude. Attention weights are a softmax over
+  keys, not a gain: reading a token that carries 4 % of the scale contributes ~4 % of the signal
+  however much attention it gets.
+- **Gradient.** Differentiating `L_scalar` ALONE: `scalar_decoder` **0.6932**, `predictor`
+  **0.1561**, `scalar_encoder` **0.003638**. The encoder that *produces* the conditioning receives
+  **~0.5 %** of the gradient the decoder gets — so the scalar objective barely shapes it.
+
+So the corrected statement: **the scalar conditioning is present, attended to, and weakly
+effective** — its influence is diluted by a 23× magnitude gap and its source is barely trained by
+the objective that is supposed to make it useful. Whether the cause is the fusion ordering, the
+summary token's construction, or the loss weighting is not settled here, and changing any of them
+is an architecture decision, not a measurement.
+
+### 19.3 Corrections issued this session
+
+For the record, four claims of mine were corrected by later measurement rather than left standing:
+the "objective degrades at scale" reading (§12.3), the "generative diversity = 0" reading (banner),
+the "one scalar stratum fails" reading (§16), and now "the scalar path is dead" (§17). Every one was
+a measurement read as a model property.
