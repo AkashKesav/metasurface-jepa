@@ -332,6 +332,77 @@ def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
 
 
 @torch.no_grad()
+def spectrum_sensitivity_probe(model, surrogate, occ, sv, spec, mask, scalar_known,
+                               device, scales=(0.0, 0.01, 0.05, 0.10), seed=1234):
+    """Does the decoded design track the target spectrum? (architecture_v5.md §8.3)
+
+    The spec requires: "perturb the target spectrum slightly with everything else
+    fixed and confirming the decoded design changes proportionally, not just that
+    raw latent variance looks healthy". That probe did not exist — the evaluator's
+    `diversity_check` runs at `perturbation_scale=0`, which is a DETERMINISM check
+    (its own docstring says the result "must not be presented as genuine generative
+    diversity"), and with `perturbation_scale > 0` it perturbs the LATENT, not the
+    target spectrum. So the one family of check that tests output-diversity collapse
+    across varying conditions was never measured.
+
+    This is the literal probe: for a set of relative perturbation scales, add
+    `scale * per-sample-spectrum-std * fixed-noise` to the TARGET SPECTRUM and
+    measure how far the decoded design moves. Everything else — occupancy, scalars,
+    mask, model weights — is fixed, and the noise comes from a fixed generator so
+    the curve is reproducible.
+
+    A flat curve means the design does not respond to the target at all: exactly the
+    Failure Mode 2 that a healthy latent-space metric would not catch (§8.3).
+
+    Returns the curve plus `design_moves` (did ANY non-zero scale move the design)
+    and whether the response is monotone in the scale.
+    """
+    gen = torch.Generator().manual_seed(int(seed))
+    unit_noise = torch.randn(spec.shape, generator=gen).to(spec.device)
+    per_sample_std = spec.std(dim=(-2, -1), keepdim=True).clamp_min(1e-6)
+
+    def decode(spec_in):
+        out = model(occ, sv, scalar_known, spec_in, mask, goal_mode="real",
+                    with_target=False)
+        geometry, _ = model.decode_geometry(
+            out["z_hat"], out["scalar_pred"], occ_input=occ, mask=mask,
+            scalar_known=scalar_known, scalar_values=sv, hard_forward=True)
+        prob = model.decode_occupancy_prob(
+            out["z_hat"], out["scalar_pred"], scalar_known=scalar_known,
+            scalar_values=sv)
+        return geometry, (prob > 0.5).float(), prob.flatten(1).mean(dim=1)
+
+    base_geom, base_bin, base_frac = decode(spec)
+    curve = {}
+    any_move = False
+    for s in scales:
+        s = float(s)
+        spec_p = spec if s == 0.0 else spec + s * per_sample_std * unit_noise
+        geom, binary, frac = decode(spec_p)
+        geom_move = float((geom - base_geom).norm() / (base_geom.norm() + 1e-12))
+        flipped = float((binary != base_bin).float().mean())
+        frac_shift = float((frac - base_frac).abs().mean())
+        curve[str(s)] = {"geometry_relative_change": geom_move,
+                         "occupancy_pixels_flipped": flipped,
+                         "predicted_occupancy_fraction_shift": frac_shift}
+        if s > 0.0 and (flipped > 0.0 or geom_move > 1e-6):
+            any_move = True
+    monotone = all(
+        curve[str(scales[i])]["occupancy_pixels_flipped"]
+        <= curve[str(scales[i + 1])]["occupancy_pixels_flipped"] + 1e-12
+        for i in range(len(scales) - 1))
+    return {
+        "scales": [float(s) for s in scales],
+        "curve": curve,
+        "design_moves": bool(any_move),
+        "pixels_flipped_monotone_in_scale": bool(monotone),
+        "note": ("architecture_v5.md §8.3: a flat curve means the design does not "
+                 "track the target spectrum (Failure Mode 2); the largest scale's "
+                 "occupancy_pixels_flipped is the headline number."),
+    }
+
+
+@torch.no_grad()
 def diversity_check(model, surrogate, occ, sv, spec, mask, scalar_known,
                     device, n_samples=5, perturbation_scale=0.0):
     """Repeated-generation diagnostic for the DETERMINISTIC inverse mapping.
@@ -619,9 +690,15 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
         model, surrogate, occ, sv, spec, M_a, device, sk_two,
         gate_threshold=_gate_threshold(cfg))
 
-    # Diversity
+    # Diversity: determinism (same input -> identical output). Its docstring is
+    # explicit that this is NOT a spectrum-sensitivity measurement.
     results["diversity_A"] = diversity_check(
         model, surrogate, occ, sv, spec, M_a, sk_a, device, n_samples=5)
+
+    # architecture_v5.md §8.3's actual probe: perturb the TARGET SPECTRUM and
+    # confirm the decoded design tracks it. This was the missing gate.
+    results["spectrum_sensitivity_A"] = spectrum_sensitivity_probe(
+        model, surrogate, occ, sv, spec, M_a, sk_a, device)
 
     # Classifier-free guidance sweep on the hard stratum (audit B24: cfg_forward
     # previously had no caller anywhere in the pipeline, so the guidance weight

@@ -66,6 +66,112 @@ def _batch(seed=0, b=2):
     return occ, sv, spec
 
 
+
+def test_spectrum_sensitivity_probe_measures_the_spec_gate():
+    """architecture_v5.md §8.3 requires perturbing the TARGET SPECTRUM and
+    confirming the decoded design tracks it. That probe did not exist: the
+    evaluator's diversity_check runs at perturbation_scale=0, which is a
+    DETERMINISM check (its own docstring says the result must not be presented as
+    generative diversity), and with a positive scale it perturbs the LATENT.
+
+    The probe must be a per-scale curve, reproducible (fixed generator), flat at
+    scale 0 (nothing perturbed -> nothing moves), and must report the design as
+    moving once the target actually changes.
+    """
+    import importlib.util
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts", "eval"))
+    from eval_scenarios import spectrum_sensitivity_probe
+
+    model = _build_model()
+    surrogate = _StubSurrogate()
+    occ, sv, spec = _batch(seed=13)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=17).sample(occ, 1.0)
+    sk = torch.zeros(occ.shape[0], 3, dtype=torch.bool)
+
+    out = spectrum_sensitivity_probe(model, surrogate, occ, sv, spec, M, sk, "cpu")
+    assert out["scales"] == [0.0, 0.01, 0.05, 0.10]
+    assert set(out["curve"].keys()) == {"0.0", "0.01", "0.05", "0.1"}
+    # scale 0 perturbs nothing, so the design cannot move
+    z = out["curve"]["0.0"]
+    assert z["geometry_relative_change"] == 0.0
+    assert z["occupancy_pixels_flipped"] == 0.0
+    # a real perturbation must be reported as movement, and every entry must be
+    # a finite, non-negative measurement
+    for key, v in out["curve"].items():
+        for metric in ("geometry_relative_change", "occupancy_pixels_flipped",
+                       "predicted_occupancy_fraction_shift"):
+            assert v[metric] >= 0.0 and v[metric] == v[metric], f"{key}.{metric}"
+    # reproducible: same probe, same curve
+    again = spectrum_sensitivity_probe(model, surrogate, occ, sv, spec, M, sk, "cpu")
+    for key in out["curve"]:
+        for metric in out["curve"][key]:
+            assert abs(out["curve"][key][metric]
+                       - again["curve"][key][metric]) < 1e-12, (
+                f"{key}.{metric} is not reproducible")
+
+
+class _SpectrumDrivenModel(nn.Module):
+    """Minimal stand-in for UnifiedJEPA whose decoded output depends on the target
+    spectrum, so the probe's response can be exercised without a trained net.
+
+    A randomly-initialised `UnifiedJEPA` saturates its occupancy sigmoid, so it
+    legitimately does not move on any perturbation and cannot be used to show that
+    the probe DETECTS movement.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, occ, sv, sk, spec, mask, goal_mode="real", with_target=False):
+        b = occ.shape[0]
+        c = spec.mean(dim=(1, 2)) * self.scale          # (B,) - depends on the target
+        return {"z_hat": c.view(b, 1, 1), "scalar_pred": torch.zeros(b, 3)}
+
+    def _prob(self, z_hat):
+        b = z_hat.shape[0]
+        return torch.sigmoid(z_hat[:, 0, 0]).view(b, 1, 1, 1).expand(b, 1, 64, 64)
+
+    def decode_occupancy_prob(self, z_hat, scalar_pred, scalar_known=None,
+                              scalar_values=None):
+        return self._prob(z_hat)
+
+    def decode_geometry(self, z_hat, scalar_pred, occ_input=None, mask=None,
+                        scalar_known=None, scalar_values=None, hard_forward=False,
+                        use_ste=False):
+        occ = self._prob(z_hat)
+        return occ.expand(-1, 3, -1, -1).contiguous(), occ
+
+
+def test_spectrum_sensitivity_probe_detects_movement():
+    """The probe must not be stuck at zero: against a model whose output depends on
+    the target spectrum, a perturbation must be reported as movement.
+
+    (Whether the SHIPPED model responds at a 1-10 % perturbation is a measurement
+    for the cloud evaluator - an untrained or saturated model legitimately may not
+    flip a single pixel, which is why this uses a spectrum-driven stub.)
+    """
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts", "eval"))
+    from eval_scenarios import spectrum_sensitivity_probe
+
+    model = _SpectrumDrivenModel()
+    surrogate = _StubSurrogate()
+    occ, sv, spec = _batch(seed=13)
+    M = BlockMasker(placement="random", grid=16, min_side=3,
+                    k_range=(1, 4), seed=17).sample(occ, 1.0)
+    sk = torch.zeros(occ.shape[0], 3, dtype=torch.bool)
+
+    out = spectrum_sensitivity_probe(model, surrogate, occ, sv, spec, M, sk, "cpu",
+                                     scales=(0.0, 0.01, 0.10))
+    assert out["curve"]["0.0"]["geometry_relative_change"] == 0.0
+    assert out["design_moves"] is True, (
+        "a spectrum-driven design must be reported as moving")
+    assert out["curve"]["0.1"]["geometry_relative_change"] > 0.0
+    assert (out["curve"]["0.1"]["geometry_relative_change"]
+            >= out["curve"]["0.01"]["geometry_relative_change"]), (
+        "a larger perturbation must not move the design less")
+
 def _corrupt_projector_running_stats(objective, mean=1e3, var=1e-6):
     """Force a large eval/train gap in the projector's BatchNorm.
 
