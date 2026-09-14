@@ -140,12 +140,19 @@ class UnifiedJEPA(nn.Module):
     def __init__(self, hidden=192, num_heads=6, geo_depth=6, predictor_depth=8,
                  goal_tokens=16, num_predictor_heads=6, scalar_hidden=128,
                  n_film_blocks=6, spec_dim=256,
-                 momentum_start=0.996, momentum_end=0.999):
+                 momentum_start=0.996, momentum_end=0.999,
+                 scalar_predictor_film=False):
         super().__init__()
         self.hidden = hidden
         self.num_heads = num_heads
         self.goal_tokens = goal_tokens
         self.architecture_id = UNIFIED_ARCHITECTURE_ID
+        # Door (b): feed the scalar conditioning into the predictor's per-block
+        # FiLM so the scalars modulate the prediction directly, instead of being
+        # reachable only by cross-attention over the fused KV. Off by default so
+        # the shipped architecture is unchanged; the projection is constructed
+        # either way (zero-init) so checkpoints stay interchangeable.
+        self.scalar_predictor_film = bool(scalar_predictor_film)
 
         # Audit B18: the scalar encoder's FiLM heads must match the occupancy
         # encoder's block count — a mismatch otherwise surfaces as an opaque
@@ -177,6 +184,8 @@ class UnifiedJEPA(nn.Module):
         self.predictor = GCLCT(
             depth=predictor_depth, hidden=hidden, num_heads=num_predictor_heads,
             c_physics_dim=384,
+            # Door (b): the scalar-FiLM projection exists only when enabled.
+            scalar_cond=scalar_predictor_film,
         )
 
         # Scalar decode heads
@@ -308,7 +317,10 @@ class UnifiedJEPA(nn.Module):
         #    returns the per-block cross-attention weights instead of being
         #    silently ignored)
         z_hat_raw, attn_weights = self.predictor(
-            queries, fused, c_physics, need_weights=need_attn)  # (B, 257, hidden)
+            queries, fused, c_physics,
+            scalar_cond=(scalar_summary.squeeze(1)
+                         if self.scalar_predictor_film else None),
+            need_weights=need_attn)  # (B, 257, hidden)
 
         # 8. Split predictions
         occupancy_pred = z_hat_raw[:, :256, :]         # (B, 256, hidden)
@@ -529,6 +541,9 @@ def build_unified_model(cfg, spec_weights, device="cpu",
     kwargs.update(
         momentum_start=cfg.get("ema_momentum_start", 0.996),
         momentum_end=cfg.get("ema_momentum_end", 0.999),
+        # Door (b): staging.scalar_predictor_film. Off => the shipped behaviour.
+        scalar_predictor_film=cfg.get("staging", {}).get(
+            "scalar_predictor_film", False),
     )
 
     model = UnifiedJEPA(**kwargs)

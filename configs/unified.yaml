@@ -111,6 +111,31 @@ staging:
   lambda_phys_ramp_steps: 500  # ramp lambda_phys 0 -> 3.32 over the first 500 steps
                        # (03_training_and_objective.md §5: "Ramp lambda_phys from
                        # zero. Do not immediately turn on a large physics loss.")
+  scalar_predictor_film: true   # DOOR (b) OF THE SCALAR INVESTIGATION (operator
+                        # decision 2026-09-13: "first a then b"). Feeds the scalar
+                        # conditioning into the predictor's per-block FiLM -- the
+                        # same multiply-and-add the blocks already use for c_physics
+                        # -- so the scalars modulate the prediction directly rather
+                        # than being reachable only by cross-attention over the
+                        # fused KV. GCLCT.scalar_cond_proj is zero-initialised
+                        # (weight AND bias), so enabling it is an exact identity at
+                        # step 0 and the architecture_v5.md zero-init convention
+                        # holds.
+                        #
+                        # IMPORTANT EXPECTATION-SETTING, found while testing this:
+                        # the block FiLM (GCLCTBlock.cond) is ALSO zero-initialised,
+                        # so at init it is a no-op for c_physics AND c_scalar alike —
+                        # the spectrum's influence on the predictor comes from
+                        # cross-attention over the fused KV, not from this FiLM.
+                        # Door (b) is therefore a ROUTE the modulation must LEARN to
+                        # use, not an instant direct effect; a null result at a short
+                        # schedule would not show the route is useless.
+                        #
+                        # MOTIVATION, measured: door (a) gave the scalar encoder a
+                        # direct gradient path and moved the scalar gates off chance
+                        # (one-known 0.5004 -> 0.6390 over 17,488 samples), but they
+                        # still fail the 0.75 bar. The residual barrier is downstream
+                        # of the encoder, which is what this addresses.
   physics_use_ste: true      # REQUIRED with lambda_phys > 0, and now enforced:
                              # the soft path is a silent dead end (0 student params
                              # with gradient, L_phys 18.58 healthy-looking, soft

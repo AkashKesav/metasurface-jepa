@@ -55,13 +55,15 @@ def _make_stub_spectrum_path(model):
     model.spectrum_path.released = stub
 
 
-def _build_model(hidden=192, geo_depth=2, predictor_depth=4):
+def _build_model(hidden=192, geo_depth=2, predictor_depth=4,
+                 scalar_predictor_film=False):
     torch.manual_seed(0)
     model = UnifiedJEPA(
         hidden=hidden, num_heads=6, geo_depth=geo_depth,
         predictor_depth=predictor_depth, goal_tokens=16,
         num_predictor_heads=6, scalar_hidden=128,
-        n_film_blocks=geo_depth, spec_dim=256)
+        n_film_blocks=geo_depth, spec_dim=256,
+        scalar_predictor_film=scalar_predictor_film)
     _make_stub_spectrum_path(model)
     model.ema.target.load_state_dict(model.occupancy_encoder.state_dict())
     model.scalar_mlp_ema.target.load_state_dict(model.scalar_encoder.state_dict())
@@ -543,6 +545,71 @@ def test_summary_readout_gives_the_scalar_encoder_a_path_that_bypasses_the_predi
     assert pred == 0.0, (
         "the read-out's gradient must NOT pass through the predictor; if it did, "
         f"this would be the existing path rather than a new one (got {pred})")
+
+
+def test_scalar_film_is_an_identity_at_init():
+    """Door (b) must respect the zero-init identity convention.
+
+    GCLCT.scalar_cond_proj is zero-initialised (weight AND bias), so enabling
+    staging.scalar_predictor_film must leave the forward pass EXACTLY unchanged at
+    step 0 — otherwise a fresh run would start from a different function and the
+    before/after comparison would measure the init, not the mechanism.
+    """
+    off = _build_model(scalar_predictor_film=False)
+    on = _build_model(scalar_predictor_film=True)
+    # The path is only constructed when enabled, so the two state_dicts differ by
+    # exactly the projection; load the shared keys and leave that one at its
+    # zero init.
+    missing, unexpected = on.load_state_dict(off.state_dict(), strict=False)
+    assert all(k.startswith("predictor.scalar_cond_proj.") for k in missing), missing
+    assert not unexpected, unexpected
+    occ, sv, spec, M = _batch(seed=3)
+    sk = torch.ones(2, 3, dtype=torch.bool)
+
+    a = off(occ, sv, sk, spec, M, goal_mode="real")
+    b = on(occ, sv, sk, spec, M, goal_mode="real")
+    assert torch.equal(a["z_hat"], b["z_hat"]), (
+        "with a zero-initialised projection the scalar-FiLM path must be an exact "
+        f"identity; max|dz|={(a['z_hat'] - b['z_hat']).abs().max().item()}")
+    assert torch.equal(a["scalar_pred"], b["scalar_pred"])
+
+
+def test_scalar_film_path_is_live_and_scalar_driven():
+    """With a non-zero projection the path must actually modulate the prediction,
+    and the modulation must be driven by the SCALAR conditioning — that is the
+    difference between door (b) and a second copy of the spectrum FiLM."""
+    def effect(model):
+        """|dz_hat| / |z_hat| when only the scalar conditioning changes."""
+        occ, sv, spec, M = _batch(seed=3)
+        sk = torch.ones(2, 3, dtype=torch.bool)
+        a = model(occ, sv, sk, spec, M, goal_mode="real")["z_hat"]
+        b = model(occ, sv * 1.5, sk, spec, M, goal_mode="real")["z_hat"]
+        return float((a - b).norm() / (a.norm() + 1e-12))
+
+    model = _build_model(scalar_predictor_film=True)
+    with torch.no_grad():
+        base = effect(model)
+        torch.manual_seed(7)
+        # The block FiLM starts at EXACTLY zero (project convention), so both the
+        # projection AND cond must be non-zero before this path is observable.
+        # Perturbing only the projection would test nothing — which is how this
+        # test first failed, and the reason it is written in two steps.
+        for blk in model.predictor.blocks:
+            blk.cond[-1].weight.add_(torch.randn_like(blk.cond[-1].weight) * 0.05)
+            blk.cond[-1].bias.add_(torch.randn_like(blk.cond[-1].bias) * 0.05)
+        mod_live = effect(model)                   # FiLM live, scalars NOT fed
+        for q in model.predictor.scalar_cond_proj.parameters():
+            q.add_(torch.randn_like(q) * 0.5)      # now feed the scalars too
+        mod_live_fed = effect(model)
+
+    # NOTE: no assertion that a live cond INCREASES sensitivity — a random cond
+    # need not, and asserting it was this test's second wrong premise. The
+    # property that actually matters is the paired one below: with the same live
+    # cond, feeding the scalars must make the prediction more scalar-sensitive.
+    assert mod_live_fed > mod_live, (
+        "with the block FiLM live, feeding the scalar conditioning through "
+        "scalar_cond_proj must make the prediction MORE sensitive to the scalars "
+        f"(not fed: {mod_live:.6f}, fed: {mod_live_fed:.6f})")
 
 
 if __name__ == "__main__":

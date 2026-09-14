@@ -69,14 +69,21 @@ class GCLCTBlock(nn.Module):
         nn.init.zeros_(self.cond[-1].weight)
         nn.init.zeros_(self.cond[-1].bias)
 
-    def forward(self, x, kv, c_physics, need_weights=False):
+    def forward(self, x, kv, c_physics, c_scalar=None, need_weights=False):
         """c_physics: (B, hidden) global physics condition — REQUIRED, no dead arg.
+        c_scalar: (B, hidden) optional scalar-conditioning modulation (door (b)).
 
         FiLM groups gamma1/beta1..gamma3/beta3 applied after each affine-less
         LayerNorm; zero-initialized cond makes the modulation an identity at init.
+
+        Door (b) adds the scalar conditioning INTO the same modulation rather than
+        leaving the scalars reachable only through cross-attention over the fused
+        KV. GCLCT.scalar_cond_proj is zero-initialized, so enabling it is an exact
+        identity at step 0 and the zero-init convention still holds.
         """
+        cond_in = c_physics if c_scalar is None else c_physics + c_scalar
         gamma1, beta1, gamma2, beta2, gamma3, beta3 = \
-            self.cond(c_physics).chunk(6, dim=-1)
+            self.cond(cond_in).chunk(6, dim=-1)
 
         h = self.norm1(x)
         h = h * (1.0 + gamma1[:, None, :]) + beta1[:, None, :]
@@ -100,7 +107,8 @@ class GCLCTBlock(nn.Module):
 
 
 class GCLCT(nn.Module):
-    def __init__(self, depth=8, hidden=384, num_heads=6, c_physics_dim=None):
+    def __init__(self, depth=8, hidden=384, num_heads=6, c_physics_dim=None,
+                 scalar_cond=False):
         super().__init__()
         self.depth = depth
         self.hidden = hidden
@@ -114,19 +122,36 @@ class GCLCT(nn.Module):
         self.final_norm = nn.LayerNorm(hidden, elementwise_affine=False, eps=1e-6)
         self.head = nn.Linear(hidden, hidden, bias=True)
 
-    def forward(self, queries, kv, c_physics, need_weights=False):
+        # Door (b): project the scalar conditioning into the per-block FiLM so the
+        # scalars modulate the prediction directly. Constructed ONLY when enabled:
+        # this project treats a parameter that can never receive gradient as a
+        # defect ("no dead arg"), and when the path is off the projection would be
+        # exactly that. Zero weight AND bias, so enabling it is an exact identity
+        # at step 0 (the architecture_v5.md zero-init convention).
+        if scalar_cond:
+            self.scalar_cond_proj = nn.Linear(hidden, hidden)
+            nn.init.zeros_(self.scalar_cond_proj.weight)
+            nn.init.zeros_(self.scalar_cond_proj.bias)
+        else:
+            self.scalar_cond_proj = None
+
+    def forward(self, queries, kv, c_physics, scalar_cond=None, need_weights=False):
         """queries: (B, T_q, hidden); kv: (B, T_kv, hidden);
         c_physics: (B, c_physics_dim) — projected to hidden via c_phys_proj
         when c_physics_dim != hidden (architecture_v5.md §3.5).
+        scalar_cond: (B, hidden) optional — door (b), see GCLCTBlock.forward.
 
         Returns z_hat (B, T_q, hidden) and per-block cross-attention weights (list of
         (B, H, T_q, T_kv) tensors) when need_weights=True.
         """
         c_physics = self.c_phys_proj(c_physics)
+        c_scalar = (None if (scalar_cond is None or self.scalar_cond_proj is None)
+                    else self.scalar_cond_proj(scalar_cond))
         x = queries
         weights = []
         for block in self.blocks:
-            x, w = block(x, kv, c_physics, need_weights=need_weights)
+            x, w = block(x, kv, c_physics, c_scalar=c_scalar,
+                         need_weights=need_weights)
             if need_weights:
                 weights.append(w)
         return self.head(self.final_norm(x)), weights
