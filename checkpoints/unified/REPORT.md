@@ -6,13 +6,18 @@ Full epoch on the complete training split (70,000 steps, λ_phys = 3.32). Primar
 the paired per-sample win rate (operator decision `3eb38a4`), with the mean criterion reported
 alongside:
 
-| gate | win rate | primary | mean criterion |
-|---|---|---|---|
-| scenario A (hard stratum) | **0.9688** | pass | true |
-| scenario B | 0.9375 | pass | true |
-| scenario C | 0.9063 | pass | true |
-| scalar dependence, one known | **0.4375** | **FAIL** | true |
-| scalar dependence, two known | 0.5938 | pass | true |
+| gate | win rate (n=32) | primary | mean criterion | full split (17,488) |
+|---|---|---|---|---|
+| scenario A (hard stratum) | **0.9688** | pass | true | 0.9939 |
+| scenario B | 0.9375 | pass | true | — |
+| scenario C | 0.9063 | pass | true | — |
+| scalar dependence, one known | 0.4375 | **FAIL** | true | **0.5004** (CI contains 0.5) |
+| scalar dependence, two known | 0.5938 | pass | true | **0.5106** (means differ by 0.0001) |
+
+**The scalar rows are noise at n = 32** (binomial SE ≈ 0.088): measured on the full split both
+strata sit at chance, so the correct statement is *scalar dependence is not demonstrated in either
+stratum* (§16) — not the one-pass/one-fail split the 32-sample batch produced, and not the "True"
+the mean criterion reported for both on differences of 0.0006 and 0.0001.
 
 The independent goal probe agrees (real 0.0990 vs shuffled 0.6035, a **6.1×** margin), and the
 win rate on the full 17,488-sample split is **0.9939** (§14).
@@ -1011,3 +1016,50 @@ gate mean "measurably better" rather than "more often than not" — `scalar_depe
 (0.5938) flips to **fail** as well, joining one-known; the three scenario gates pass either way.
 That is a one-line change and is the operator's call; it is flagged rather than applied because it
 changes a gate's verdict, which is precisely the kind of change that must not be made silently.
+
+---
+
+## 16. Scalar dependence over the full validation split (2026-09-13)
+
+The new primary gate reported `scalar_dependence_one_known` **failing** at a win rate of 0.4375 and
+`two_known` passing at 0.5938 — a 32-sample batch, where the binomial standard error around 0.5 is
+**0.088**. Both readings are inside one SE of chance, so neither said anything. Kernel
+`anosvol/metasurface-jepa-192d-scalar-scan` (v1), commit `3eb38a4`, `exit=0`, scan 285 s: both
+scalar gates measured on **all 17,488 validation samples**.
+
+### 16.1 The result — scalar dependence is not demonstrated
+
+| stratum | win rate | 95 % CI | mean real / shuffled | median real / shuffled | mean criterion |
+|---|---|---|---|---|---|
+| one known | **0.5004** | [0.4930, 0.5078] — **includes 0.5** | 0.1185 / 0.1179 | 0.0733 / 0.0734 | True |
+| two known | **0.5106** | [0.5032, 0.5180] | 0.1071 / 0.1072 | 0.0866 / 0.0866 | True |
+
+- **`one_known`: 8,751 wins out of 17,488 — a coin flip.** The CI contains 0.5, and the mean error
+  is marginally *worse* under true conditioning (0.1185 vs 0.1179).
+- **`two_known`: 8,930 wins out of 17,488 — 1.06 % above chance.** The CI excludes 0.5 by a hair,
+  and the means differ by **0.0001** (0.1071 / 0.1072). A statistically detectable effect of
+  immeasurable size is not "demonstrating scalar usage".
+- The two 32-sample readings were **both noise**: z = −0.71 and +0.94 against the full-split rates.
+  The gate split them into one pass and one fail purely by sampling.
+
+**So the honest statement is not "one stratum fails" (§15.2) but "scalar dependence is not
+demonstrated in either stratum"** — and the win rate's ability to say that plainly, where the mean
+criterion reported `True` for both, is the strongest argument for the switch made in `3eb38a4`.
+The old statistic called both strata passing on differences of 0.0006 and 0.0001.
+
+### 16.2 What this does and does not establish
+
+- **Established:** the scalar *conditioning* input, as exercised by this test, does not measurably
+  change the deployed design's spectrum error. Measured on 17,488 samples, with a CI that excludes
+  any effect larger than ~1 %.
+- **Not established: that the model ignores scalars.** The test perturbs only the conditioning
+  input (`sv_cond`) while the decode/assembly path keeps the TRUE scalar values for the known
+  columns (`scalar_values=sv`). With 1 of 3 columns known, the remaining two flow through
+  `scalar_pred`; with 2 of 3 known, only one does — which may be exactly why the two-known stratum
+  is marginally the more sensitive one. Whether the cause is "the encoder-side conditioning is
+  ignored" or "the test's known-column substitution masks it" is **not distinguishable from this
+  measurement** and needs the direct instrument used for the spectrum: perturb the scalar
+  conditioning and measure the change in `z_hat` / `scalar_pred` / the decoded geometry per stage,
+  as `REPORT.md` §10.2 did for the goal.
+- The gate as configured at 32 samples **cannot** decide this: at that size the win rate has a
+  ±0.176 (95 %) interval, so everything from 0.32 to 0.68 reads as "consistent with chance".
