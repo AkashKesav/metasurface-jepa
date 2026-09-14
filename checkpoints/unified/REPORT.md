@@ -893,3 +893,62 @@ the batch contains **no** empty or near-empty occupancies (`n_occ_frac_zero = 0`
 input: the model maps that particular spectrum to a catastrophic design while a *different*
 spectrum on the same sample yields 0.88. It is an instability hole in the learned inverse map —
 specific and diagnosable, unlike the aggregate "one sample is bad" reading.
+
+---
+
+## 14. Failure-rate scan over the full validation split (2026-09-13)
+
+Kernel `anosvol/metasurface-jepa-192d-failure-scan` (v1), read-only on the full-epoch checkpoint,
+all stages `exit=0`, scan 154 s. Scenario A (hard stratum) evaluated on **all 17,488 validation
+samples**, chunked at 256, real and shuffled conditioning — so the gate is measured on 17,488
+samples instead of the 32 the evaluator uses.
+
+### 14.1 The distribution
+
+| conditioning | mean | median | p90 | p99 | p99.9 | max |
+|---|---|---|---|---|---|---|
+| **real** | **0.1196** | **0.0749** | 0.1973 | 0.3500 | 6.7443 | 30.4993 |
+| shuffled | 0.6084 | 0.6023 | 0.9009 | 1.1731 | — | 23.6908 |
+
+- **`real` beats `shuffled` on 99.39 % of the 17,488 samples** (vs 31/32 at n = 32). The paired
+  difference is `+0.4889` mean, `+0.5093` median.
+- **The model now beats the retrieval baseline on the mean**: `0.1196` against `0.1254`, and on
+  the median it is ~8× better than the shuffled control.
+- p90 `0.1973` — 90 % of designs are within 0.2 of the target spectrum.
+
+### 14.2 The failure mode is a 0.15 % tail, not a property of the model
+
+| threshold | samples | fraction |
+|---|---|---|
+| > 0.5 | 34 | 0.1944 % |
+| > 1.0 | **27** | **0.1544 %** |
+| > 2.0 | 25 | 0.1430 % |
+| > 5.0 | 21 | 0.1201 % |
+| > 10.0 | 17 | 0.0972 % |
+
+27 catastrophic designs out of 17,488. The worst 20 are **scattered** — split indices 12874,
+11053, 5573, 7431, 6897, 11402, 7176, 11199, 10643, 17440, 9774, 366, 5117, 9479, 17387, 14411,
+16712, 6805, 318, 9814 — with **no input property that predicts them**: every one of the 20 has an
+occupancy fraction in 0.36–0.61 and a spectrum std in 0.43–0.61, i.e. squarely inside the normal
+range. There is no degenerate-input regime to exclude and no cluster to characterise.
+
+The signature is distinctive: on those samples the **shuffled** conditioning gives a *normal*
+result (0.7–1.4) while the **true** spectrum gives 15–30. So the model maps a small set of specific
+spectra into a region where its decoded design blows up — an instability hole in the learned
+inverse map, not a data problem and not a general failure.
+
+### 14.3 What this settles
+
+- **"One bad sample out of 32" is now a rate: 0.15 %, unpredicted by the inputs.** The 32-sample
+  gate batch simply happened to contain one of the 27 (a ~5 % chance per batch), which is why its
+  mean read 0.8779 while the full-split mean is 0.1196. The 2-sample batches used before audit B27
+  hit the same tail far more easily.
+- **The model is working.** Mean better than the retrieval baseline, median 8× better than the
+  control, 99.39 % of samples on the right side of the gate.
+- **A mean-based gate is fragile against this tail.** `real < shuffled` on the means can flip on a
+  single catastrophic sample, whereas the paired beats-fraction (99.39 %) is stable. Making the
+  beats-fraction the primary gate statistic — or reporting both — is a **gate-definition decision
+  for the operator**, not a change to make silently; the criterion itself is unchanged and nothing
+  here relaxes it.
+- The honest statement of quality is therefore: *a working inverse design with a ~0.15 %
+  catastrophic-failure tail whose cause is not yet identified.*
