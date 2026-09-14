@@ -1204,3 +1204,69 @@ For the record, four claims of mine were corrected by later measurement rather t
 the "objective degrades at scale" reading (§12.3), the "generative diversity = 0" reading (banner),
 the "one scalar stratum fails" reading (§16), and now "the scalar path is dead" (§17). Every one was
 a measurement read as a model property.
+
+---
+
+## 20. Ablation and tail probes: magnitude is not the scalar bottleneck, and the tail is a coverage gap
+
+Kernel `anosvol/metasurface-jepa-192d-scalar-abl` (v1), commit `3621b7f`, `exit=0`, read-only on the
+full-epoch checkpoint; run 102 s.
+
+### 20.1 A. Scaling the scalar-summary token does NOT restore scalar sensitivity
+
+The token is scaled at inference by a wrapper around the scalar encoder (no training, no
+architecture change in the repo), and the output's sensitivity to the scalar conditioning is
+measured against the spectrum control:
+
+| scale | Δ`scalar_pred` from scalars | from spectrum | ratio | Δgeometry from scalars |
+|---|---|---|---|---|
+| **1** (shipped) | 0.000145 | 0.245736 | **0.00059** | 0.032432 |
+| 3 | 0.000161 | 0.245813 | 0.00066 | 0.033127 |
+| 10 | 0.000294 | 0.242522 | 0.00121 | 0.035864 |
+| 30 | 0.000342 | 0.242187 | 0.00141 | 0.035992 |
+| **100** | 0.000713 | 0.243824 | **0.00292** | 0.062841 |
+
+A **100×** scale-up multiplies the scalar effect by only ~5×, leaving it **~340× below** the
+spectrum's. On scalars whose range is ~2.5–5, an absolute shift of 0.0007 is still nothing.
+
+**Conclusion: magnitude is NOT the binding constraint.** §19 identified the 4.4 % token magnitude as
+one of two candidate causes; this rules it out as the primary one. Enlarging a token whose content
+the network does not use does not make it use the content.
+
+**Consequence for the fix:** the scalar conditioning problem is **structural**, not a scale or
+weighting tweak. That is the answer to the question this ablation was run to settle, and it means
+the remaining candidate is *how the scalar information enters the network* — the summary is a KV
+entry only (token 273 of 273), while the scalar prediction comes from a **separate learned query
+token**, so the gradient from `L_scalar` to the scalar encoder runs through the predictor's attention
+(measured in §19.2: encoder 0.0036 against decoder 0.6932).
+
+One design caveat that constrains any fix, recorded because it makes the obvious shortcut wrong:
+the scalar prediction must not be able to *read* the conditioning values, or a partially-known
+sample could copy a known scalar into an unknown position. The conditioning is deliberately fed as
+context while the prediction comes from a query over the occupancy — so "let the scalar head read
+the summary token directly" is not automatically safe, and any change there needs to state why it
+cannot leak.
+
+### 20.2 B. The catastrophic tail IS a coverage gap
+
+The 27 samples above 1.0 (`median 0.0749`, `mean 0.1196` over 17,488) are not mysterious after all —
+their **spectra are far from anything in the training set**:
+
+| | distance to nearest TRAINING spectrum | spectrum std | mean magnitude |
+|---|---|---|---|
+| **worst 30** | **6.2788** (median 5.7287, min 2.9925) | 0.5014 | 0.4066 |
+| random 30 (control) | 2.1684 (median 1.9861, min 0.1403) | 0.5865 | 0.5119 |
+
+The catastrophic samples sit **2.9× farther** from the nearest training spectrum than ordinary
+validation samples — and their minimum distance (2.99) is still *above* the control's mean (2.17),
+i.e. **every one of them is an extrapolation**. They are also flatter and weaker (std 0.501 vs
+0.587).
+
+So the failure is not a defect in the model's mapping so much as **the model being asked to invert
+spectra unlike any it trained on** — and §14's finding that no *input* property (occupancy, scalar,
+spectrum std) predicted them was looking at the wrong property: the predictor is distance in
+*spectrum space to the training set*, not any per-sample statistic.
+
+**Practical consequence:** an out-of-distribution check at inference — nearest-training-spectrum
+distance — would flag exactly these cases rather than silently emitting an unusable design. That is
+a read-out guard, not a training change.
