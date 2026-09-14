@@ -1,26 +1,38 @@
 # Unified 192-D JEPA — cloud run report (Kaggle)
 
-**CURRENT STATUS: the acceptance gate PASSES, now at full scale — §12 supersedes §4 and §11.**
-A full epoch over the complete training split (70,000 steps, λ_phys = 3.32, 32-sample gate) passes
-on **all three scenarios**: A (hard stratum) real 0.8779 vs shuffled 1.2459 with **31/32 samples**
-supporting it, B 0.1078 vs 1.1825, C 0.0445 vs 0.1931. Scalar dependence passes both strata for
-the first time, and the independent goal probe agrees (real 0.0990 vs shuffled 0.6035, a **6.1×**
-margin).
+**CURRENT STATUS: the three scenario gates PASS on the primary statistic; scalar dependence fails
+one of its two strata — §15 is the current reading, superseding §4, §11 and §12's gate numbers.**
+Full epoch on the complete training split (70,000 steps, λ_phys = 3.32). Primary gate statistic is
+the paired per-sample win rate (operator decision `3eb38a4`), with the mean criterion reported
+alongside:
 
-Two readings that matter more than the headline:
+| gate | win rate | primary | mean criterion |
+|---|---|---|---|
+| scenario A (hard stratum) | **0.9688** | pass | true |
+| scenario B | 0.9375 | pass | true |
+| scenario C | 0.9063 | pass | true |
+| scalar dependence, one known | **0.4375** | **FAIL** | true |
+| scalar dependence, two known | 0.5938 | pass | true |
 
-- **Scenario A's mean is one sample.** Median real 0.0807 vs shuffled 0.6529 — the model is ~8×
-  better on the median sample, while a single pathological sample (real 25.06 against a 0.88
-  shuffled) drags the mean to 0.8779. Excluding it, real 0.0980 and the gap widens to +1.1597.
-  The gate passes either way, but the median is the honest summary and the outlier is a concrete
-  thing to diagnose.
+The independent goal probe agrees (real 0.0990 vs shuffled 0.6035, a **6.1×** margin), and the
+win rate on the full 17,488-sample split is **0.9939** (§14).
+
+Three readings that matter more than the headline:
+
+- **Switching to the win rate exposed a gate that was passing on the wrong statistic.**
+  `scalar_dependence_one_known` passes the mean criterion while losing on the majority of samples
+  (0.4375). It had not been reported as failing before. The change surfaced this; it did not cause
+  it — the same model was measured both ways (§15.2).
+- **Scenario A's mean is one sample.** Median real 0.0807 vs shuffled 0.6529 — ~8× better — while
+  one pathological sample (real 25.06 against 0.88) drags the mean to 0.8779. That pathology is a
+  **0.15 % tail** (27 of 17,488 samples), scattered with no input property predicting it (§14.2),
+  and it remains open.
 - **The objective does NOT degrade at scale — that reading was mine and it was wrong** (§12.3).
   The "`L_inv` 1.38 → 8.26, `L_cov` → 872" figure came from validation, which runs the objective
   in `eval()` mode where the projector's BatchNorm uses stale running statistics; measured
   train-vs-eval on the same state the gap is **759×** and **364×**. Training's own numbers at step
-  69,990 (`L_inv=0.0069`, `L_cov=2.29`) match the train-mode measurement. `raw_cos_err` did
-  improve over the epoch (0.999 → 0.827, better than the 20k plateau), and `L_cov` is only
-  **3.65 %** of the gradient budget (§13) — so it was never steering training.
+  69,990 (`L_inv=0.0069`, `L_cov=2.29`) match the train-mode measurement, and `L_cov` is only
+  **3.65 %** of the gradient budget (§13).
 
 The earlier negative readings in §4 were produced by a **2-sample** estimator and are superseded:
 the model was content-sensitive and the measurement could not see it (§11.2).
@@ -952,3 +964,50 @@ inverse map, not a data problem and not a general failure.
   here relaxes it.
 - The honest statement of quality is therefore: *a working inverse design with a ~0.15 %
   catastrophic-failure tail whose cause is not yet identified.*
+
+---
+
+## 15. The paired win rate as the primary gate — first reading (2026-09-13)
+
+Operator decision recorded in `3eb38a4`: the primary gate statistic is
+`real_beats_shuffled_fraction` (the paired per-sample win rate), with the mean criterion kept and
+reported as `gate_mean_criterion`. Kernel `anosvol/metasurface-jepa-192d-new-gate` (v1), commit
+`3eb38a4`, `exit=0`, ran the authoritative evaluator against the full-epoch checkpoint with
+`--samples 32`.
+
+### 15.1 The output
+
+| gate | win rate | `gate` | `gate_mean_criterion` |
+|---|---|---|---|
+| scenario **A** (hard stratum) | **0.9688** | pass | true |
+| scenario **B** | 0.9375 | pass | true |
+| scenario **C** | 0.9063 | pass | true |
+| scalar dependence, one known | **0.4375** | **FAIL** | true |
+| scalar dependence, two known | 0.5938 | pass | true |
+
+### 15.2 Two findings, one of them new
+
+1. **The change exposed a gate that was passing on the wrong statistic.**
+   `scalar_dependence_one_known` passes the mean criterion while its win rate is **0.4375** — it
+   loses on more samples than it wins, and passed only because its few wins were larger than its
+   losses. That is exactly the pathology the switch was made to catch, and the old statistic was
+   reporting it as a pass. **Scalar dependence in the one-known stratum is now a failing gate**,
+   and it had not been before. This is a finding the change surfaced, not one it caused: the same
+   model was measured both ways.
+2. **The 32-sample gate now agrees with the 17,488-sample scan.** Scenario A's win rate of 0.9688
+   matches the full-split 0.9939 to within the batch-size difference, and is unmoved by the sample
+   that had driven the mean to 0.8779 with a paired σ of 5.78. Robustness is the point, and it
+   holds.
+
+The two statistics disagree on one-known: the mean says pass, the win rate says fail. Where they
+disagree the win rate is the honest one — a conditioning that loses on the majority of samples is
+not demonstrating dependence, however large its occasional wins.
+
+### 15.3 Threshold
+
+The implemented threshold is **0.5** (definitional majority), config key
+`eval.gate_beats_fraction_min`, validated to [0, 1]. At **0.75** — the value that would make the
+gate mean "measurably better" rather than "more often than not" — `scalar_dependence_two_known`
+(0.5938) flips to **fail** as well, joining one-known; the three scenario gates pass either way.
+That is a one-line change and is the operator's call; it is flagged rather than applied because it
+changes a gate's verdict, which is precisely the kind of change that must not be made silently.
