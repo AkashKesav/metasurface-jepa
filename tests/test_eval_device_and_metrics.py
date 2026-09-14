@@ -66,6 +66,111 @@ def _batch(seed=0, b=2):
     return occ, sv, spec
 
 
+def _corrupt_projector_running_stats(objective, mean=1e3, var=1e-6):
+    """Force a large eval/train gap in the projector's BatchNorm.
+
+    The projector's running statistics are a blend of two different distributions
+    (predictor output and EMA-target output), so in practice they drift; here they
+    are set far off on purpose so the two modes differ by orders of magnitude and
+    a test can tell which one validate() reported.
+    """
+    for m in objective.projector.modules():
+        if isinstance(m, nn.BatchNorm1d):
+            with torch.no_grad():
+                m.running_mean.fill_(mean)
+                m.running_var.fill_(var)
+                m.num_batches_tracked.fill_(1000)
+
+
+def test_projector_train_mode_restores_running_stats():
+    """Audit B28: BatchNorm updates its running statistics in train mode even
+    under torch.no_grad(), so the helper MUST snapshot and restore them — or
+    every validation pass would silently corrupt the projector's statistics."""
+    from scripts.train.train_unified import projector_train_mode
+
+    objective = _objective()
+    _corrupt_projector_running_stats(objective, mean=7.5, var=2.5)
+    before = {k: v.clone() for k, v in objective.projector.state_dict().items()
+              if k.endswith(("running_mean", "running_var", "num_batches_tracked"))}
+    assert before, "the projector must expose BatchNorm running statistics"
+
+    with projector_train_mode(objective):
+        assert objective.projector.training, "the projector must be in train mode"
+        with torch.no_grad():
+            _ = objective.projector(torch.randn(8, 192))
+
+    after = {k: v.clone() for k, v in objective.projector.state_dict().items()
+             if k.endswith(("running_mean", "running_var", "num_batches_tracked"))}
+    for k in before:
+        assert torch.equal(before[k], after[k]), (
+            f"running statistic {k} was modified by projector_train_mode")
+
+
+def test_validate_reports_projected_metrics_from_train_mode():
+    """Audit B28: validate() ran the objective under eval(), where the projector's
+    BatchNorm uses accumulated running statistics instead of batch statistics. One
+    shared projector serves two distributions, so those fit neither — measured at
+    the full-epoch checkpoint the eval-mode values were 759x (L_inv) and 364x
+    (L_cov) larger than what training optimises, and the reported diagnostics were
+    read as evidence of an objective defect that did not exist.
+
+    The reported value must be the TRAIN-mode one. Both references are computed on
+    exactly the population validate() uses (a single hard stratum, so the masker's
+    first draw is the one under test).
+    """
+    from scripts.train.train_unified import validate
+
+    model = _build_model()
+    objective = _objective()
+    # a mild, non-saturating corruption: scaling the normalisation separates the
+    # two modes without collapsing both branches onto the same constant
+    _corrupt_projector_running_stats(objective, mean=0.0, var=0.01)
+    occ, sv, spec = _batch(seed=7)
+    strata = [("hard", 1.0, False)]
+    cfg = {"curriculum": {"easy_mask_ratio": 0.25, "hard_mask_ratio": 1.0}}
+    M = BlockMasker(placement="random", grid=16, min_side=3, k_range=(1, 4),
+                    seed=12345).sample(occ, 1.0)
+    sk = torch.zeros(occ.shape[0], 3, dtype=torch.bool)
+
+    def proj_mse(in_train_mode):
+        objective.train(in_train_mode)
+        with torch.no_grad():
+            res = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+            mb = res["out"]["mask"]
+            return float(torch.nn.functional.mse_loss(
+                res["projector_outputs"]["p_hat"][mb],
+                res["projector_outputs"]["p_y"][mb]))
+
+    train_ref, eval_ref = proj_mse(True), proj_mse(False)
+    assert abs(train_ref - eval_ref) > 1e-3 * max(train_ref, 1e-6), (
+        "the corruption must actually separate the two modes "
+        f"(train={train_ref}, eval={eval_ref})")
+
+    out = validate(model, objective, [(occ, sv, spec)], cfg, "cpu", strata=strata)
+    reported = out["hard"]["proj_mse"]
+    assert abs(reported - train_ref) <= abs(reported - eval_ref), (
+        "validate() must report the TRAIN-mode projected metrics; it reported "
+        f"{reported}, train-mode is {train_ref}, eval-mode is {eval_ref}")
+
+
+def test_validate_marks_physics_as_not_evaluated():
+    """Audit B28: the objective gates the physics term on `model.training` (its
+    STE path is training-only) and validation runs under eval(), so `L_phys` is
+    structurally zero there. Reporting 0.0 reads as "physics contributes nothing"
+    when it means "not measured"."""
+    from scripts.train.train_unified import validate
+
+    model = _build_model()
+    objective = _objective()
+    occ, sv, spec = _batch(seed=7)
+    cfg = {"curriculum": {"easy_mask_ratio": 0.25, "hard_mask_ratio": 1.0}}
+    out = validate(model, objective, [(occ, sv, spec)], cfg, "cpu")
+    for stratum in ("easy", "hard"):
+        assert out[stratum]["L_phys"] is None
+        assert out[stratum]["L_phys_weighted"] is None
+        assert out[stratum]["L_phys_evaluated"] is False
+
+
 def test_evaluate_scenario_occupancy_metrics_use_raw_probability():
     """Audit B7: occupancy IoU/F1/fraction must come from the model's RAW sigmoid
     occupancy.

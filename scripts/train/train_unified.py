@@ -21,6 +21,7 @@ machine. This script supports both local smoke tests and cloud runs.
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -486,6 +487,39 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     return result, M, sk
 
 
+@contextlib.contextmanager
+def projector_train_mode(objective):
+    """Compute the projected terms with the projector in TRAIN mode, without
+    contaminating its BatchNorm running statistics.
+
+    Audit B28. `validate()` runs the objective under `eval()`, where the
+    projector's two `BatchNorm1d` layers use accumulated RUNNING statistics
+    instead of batch statistics. One shared projector serves TWO different
+    distributions (the predictor's output and the EMA target's output), so its
+    running statistics fit neither — measured at the full-epoch checkpoint, the
+    eval-mode values were **759×** (`L_inv`) and **364×** (`L_cov`) larger than
+    the values training actually optimises. The projected diagnostics therefore
+    measured a different function from the training objective.
+
+    The running statistics are snapshotted and restored, because BatchNorm
+    updates them in train mode even under `torch.no_grad()`.
+    """
+    proj = getattr(objective, "projector", None)
+    if proj is None:
+        yield
+        return
+    saved = {k: v.detach().clone() for k, v in proj.state_dict().items()
+             if k.endswith(("running_mean", "running_var", "num_batches_tracked"))}
+    was_training = proj.training
+    proj.train()
+    try:
+        yield
+    finally:
+        if saved:
+            proj.load_state_dict(saved, strict=False)
+        proj.train(was_training)
+
+
 def validate(model, objective, val_batches, cfg, device, strata=None):
     """Run validation on a list of pre-built (occ, sv, spec) batches.
 
@@ -524,7 +558,10 @@ def validate(model, objective, val_batches, cfg, device, strata=None):
         ]
     out = {}
     try:
-        with torch.no_grad():
+        # Audit B28: the projected diagnostics must be computed with the
+        # projector in train mode, or they measure a different function than the
+        # objective trains (see projector_train_mode).
+        with torch.no_grad(), projector_train_mode(objective):
             for name, mask_ratio, scalars_known in strata:
                 val_masker = BlockMasker(
                     placement="random", grid=16, min_side=3, k_range=(1, 4),
@@ -601,6 +638,14 @@ def validate(model, objective, val_batches, cfg, device, strata=None):
                     float(np.mean(achieved_fracs)) if achieved_fracs else None)
                 stratum["scalars"] = ("all_known" if scalars_known
                                       else "all_unknown")
+                # Audit B28: the physics term is NOT evaluated here. The objective
+                # gates it on `model.training` (its STE path is training-only),
+                # and validation runs under eval(), so `L_phys` is structurally
+                # zero — reporting 0.0 reads as "physics contributes nothing"
+                # when it means "not measured".
+                stratum["L_phys"] = None
+                stratum["L_phys_weighted"] = None
+                stratum["L_phys_evaluated"] = False
                 out[name] = stratum
     finally:
         model.train()
