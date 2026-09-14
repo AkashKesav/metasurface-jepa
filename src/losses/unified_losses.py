@@ -54,36 +54,6 @@ class ScalarPredictionLoss(nn.Module):
         return err.sum() / n_unknown
 
 
-class PhysicsSpectrumLoss(nn.Module):
-    """Physics-response loss (placeholder — disabled in Phase 3).
-
-    When enabled (lambda_phys > 0), the predicted geometry is decoded and
-    passed through the frozen MetaDiT EM surrogate to compute spectrum
-    error against the target. Currently returns zero; the training loop
-    gates activation via lambda_phys > 0.
-
-    Per Phase 3 MD §6: when physics loss is active, the MetaDiT forward
-    MUST remain differentiable w.r.t. geometry input — this class should
-    only be enabled after the no-physics architecture is numerically
-    stable.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._enabled = False
-
-    def forward(self, spectrum_pred, spectrum_target):
-        if not self._enabled:
-            return torch.zeros((), device=spectrum_pred.device)
-        return F.mse_loss(spectrum_pred, spectrum_target)
-
-    def enable(self):
-        self._enabled = True
-
-    def disable(self):
-        self._enabled = False
-
-
 class UnifiedJEPALoss(nn.Module):
     """Combined JEPA + VICReg + scalar + (optional) physics objective.
 
@@ -140,7 +110,6 @@ class UnifiedJEPALoss(nn.Module):
         # terms inline via the shared objective-owned projector. Keeping an
         # unused module here would be dead, misleading code.
         self.scalar_loss = ScalarPredictionLoss(loss_type=scalar_loss_type)
-        self.physics_loss = PhysicsSpectrumLoss()
 
     def forward(self, model, occupancy, scalar_values, scalar_known,
                 spectrum, mask, goal_mode="real"):
@@ -194,8 +163,11 @@ class UnifiedJEPALoss(nn.Module):
                 scalar_known, spectrum, mask, loss_type="smooth_l1",
                 use_ste=self.physics_use_ste, normalize=True)
         else:
-            L_phys = self.physics_loss(
-                out.get("spectrum_target", spectrum), spectrum)
+            # The physics term is inactive (lambda_phys = 0, no surrogate, eval
+            # mode, or a goal-dropped step). It is genuinely zero here, not
+            # "measured as zero" - validation reports it as not-evaluated for
+            # that reason (audit B28).
+            L_phys = torch.zeros((), device=z_hat.device)
 
         # Occupancy BCE (architecture_v5.md §4.1; operator decision 2026-09-13):
         # direct supervision of the decoder on MASKED pixels. Without it the

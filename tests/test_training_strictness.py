@@ -91,6 +91,52 @@ def test_config_accepts_the_shipped_eval_samples():
     _validate_config(cfg)
 
 
+
+def test_checkpoint_config_differences_are_detected():
+    """ckpt["cfg"] was written into every checkpoint and never read, so editing the
+    YAML between save and resume silently diverged the run from its own record.
+    The comparison must find nested changes and ignore runtime annotations."""
+    from train_unified import _config_differences
+
+    saved = {"loss": {"lambda_phys": 0.1, "lambda_inv": 25.0},
+             "train": {"total_steps": 1500}, "_architecture_id": "x"}
+    live = {"loss": {"lambda_phys": 3.32, "lambda_inv": 25.0},
+            "train": {"total_steps": 70000}, "_architecture_id": "y"}
+
+    diffs = dict((path, (a, b)) for path, a, b in _config_differences(saved, live))
+    assert "loss.lambda_phys" in diffs, diffs
+    assert diffs["loss.lambda_phys"] == (0.1, 3.32)
+    assert "train.total_steps" in diffs
+    assert not any(p.startswith("_") for p in diffs), (
+        "runtime annotations are not user config and must not be reported")
+    assert "loss.lambda_inv" not in diffs, "identical values must not be reported"
+
+    # identical configs produce no differences
+    assert _config_differences(saved, dict(saved)) == []
+
+
+def test_objective_state_excludes_the_frozen_surrogate():
+    """The objective registers the released surrogate as a submodule, so a plain
+    state_dict() serialises ~25 MB of frozen weights into every checkpoint - while
+    the loader deliberately ignores those keys and re-loads the surrogate from disk.
+    Measured: 188 MB with the surrogate, 163 MB without."""
+    from train.engine import saveable_objective_state
+
+    class _Obj:
+        def __init__(self):
+            self._sd = {"projector.net.0.weight": 1, "surrogate.blocks.0.weight": 2,
+                        "surrogate.head.bias": 3, "scalar_loss.dummy": 4}
+
+        def state_dict(self):
+            return self._sd
+
+    sd = saveable_objective_state(_Obj())
+    assert "projector.net.0.weight" in sd
+    assert "scalar_loss.dummy" in sd
+    assert not any(k.startswith("surrogate.") for k in sd), (
+        f"surrogate keys must be excluded from the saved objective state: {sorted(sd)}")
+    assert saveable_objective_state(None) is None
+
 def test_real_mode_missing_data_raises():
     """Fix 5: real training with a missing dataset split must raise, never
     silently fall back to synthetic data."""

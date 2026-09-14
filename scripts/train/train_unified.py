@@ -493,6 +493,27 @@ def training_step(model, objective, occ, sv, spec, cfg, device, step,
     return result, M, sk
 
 
+def _config_differences(saved, live, prefix=""):
+    """Key paths where a checkpoint's recorded config differs from the live one.
+
+    `ckpt["cfg"]` was written into every checkpoint and never read, so editing the
+    YAML between save and resume silently diverged the run from its own record
+    (audit B28-adjacent). Keys starting with "_" are runtime annotations added by
+    the trainer, not user config.
+    """
+    out = []
+    for k in sorted(set(saved or {}) | set(live or {}), key=str):
+        if isinstance(k, str) and k.startswith("_"):
+            continue
+        a, b = (saved or {}).get(k), (live or {}).get(k)
+        path = f"{prefix}{k}"
+        if isinstance(a, dict) and isinstance(b, dict):
+            out.extend(_config_differences(a, b, f"{path}."))
+        elif a != b:
+            out.append((path, a, b))
+    return out
+
+
 @contextlib.contextmanager
 def projector_train_mode(objective):
     """Compute the projected terms with the projector in TRAIN mode, without
@@ -909,6 +930,22 @@ def train(cfg, resume_path=None, no_train=False, device=None,
                   "(legacy checkpoint) — mask-ratio/scalar-regime/goal-dropout "
                   "sampling restarts from the seed and will not match an "
                   "uninterrupted run.")
+        # Report any divergence between the config the checkpoint was trained
+        # with and this run's config. The live config wins (it is what the user
+        # asked for) but never silently.
+        saved_cfg = ckpt.get("cfg")
+        if saved_cfg:
+            diffs = _config_differences(saved_cfg, cfg)
+            if diffs:
+                print(f"[resume] NOTE: the checkpoint was trained with a different "
+                      f"config — {len(diffs)} value(s) differ; THIS run's config wins:")
+                for path, old, new in diffs[:20]:
+                    print(f"[resume]   {path}: checkpoint={old!r} -> this run={new!r}")
+                if len(diffs) > 20:
+                    print(f"[resume]   ... and {len(diffs) - 20} more")
+        else:
+            print("[resume] WARNING: checkpoint carries no recorded config "
+                  "(legacy) — cannot check that this run matches the one it resumes.")
         print(f"Resumed at step {start_step}")
 
     # --- no-train smoke ---

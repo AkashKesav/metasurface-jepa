@@ -34,7 +34,6 @@ from assembly import (
 from losses.unified_losses import (
     UnifiedJEPALoss,
     ScalarPredictionLoss,
-    PhysicsSpectrumLoss,
 )
 from data.mask import BlockMasker
 
@@ -342,23 +341,28 @@ def test_scalar_loss_huber():
 # Physics loss disabled by default
 # --------------------------------------------------------------------------
 
-def test_physics_loss_disabled_by_default():
-    phys = PhysicsSpectrumLoss()
-    pred = torch.randn(2, 2, 301)
-    target = torch.randn(2, 2, 301)
-    L = phys(pred, target)
-    assert L.item() == 0.0
-    assert not phys._enabled
+def test_physics_placeholder_is_gone_and_the_term_is_exactly_zero():
+    """The inactive physics branch is genuinely zero, not "measured as zero".
 
+    This replaces two tests of `PhysicsSpectrumLoss`, a placeholder whose `_enabled`
+    flag was never set — so it always returned a zero tensor while reading like a
+    real fallback. It was deleted as dead code; the contract worth pinning is the
+    objective's: with `lambda_phys = 0` it must report an exact zero, and validation
+    reports the term as NOT EVALUATED for the same reason (audit B28).
+    """
+    objective = UnifiedJEPALoss(hidden=192, lambda_phys=0.0)
+    assert not hasattr(objective, "physics_loss"), (
+        "the inert PhysicsSpectrumLoss placeholder must be gone")
 
-def test_physics_loss_enables():
-    phys = PhysicsSpectrumLoss()
-    phys.enable()
-    assert phys._enabled
-    pred = torch.randn(2, 2, 301)
-    target = torch.randn(2, 2, 301)
-    L = phys(pred, target)
-    assert L > 0
+    model = _build_model()
+    occ, sv, spec, M = _batch(seed=3)
+    sk = torch.zeros(occ.shape[0], 3, dtype=torch.bool)
+    with torch.no_grad():
+        res = objective(model, occ, sv, sk, spec, M, goal_mode="real")
+    assert res["components"]["L_phys"] == 0.0, (
+        "with lambda_phys=0 and no surrogate the physics term must be exactly zero")
+    assert res["components"]["L_phys_weighted"] == 0.0
+    assert torch.isfinite(res["total_loss"])
 
 
 # --------------------------------------------------------------------------

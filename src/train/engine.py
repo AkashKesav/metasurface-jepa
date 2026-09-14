@@ -240,6 +240,24 @@ def _check_optimizer_ownership(optimizer, saved_shapes):
             "(spec §30 ownership check)")
 
 
+def saveable_objective_state(objective):
+    """Objective state WITHOUT the frozen surrogate.
+
+    When physics is active the objective registers the released EM surrogate as a
+    submodule, so a plain `objective.state_dict()` serialises ~25 MB of frozen
+    weights into every checkpoint — measured: the full-epoch checkpoint is 188 MB
+    versus 163 MB before physics was switched on. The loader deliberately IGNORES
+    `surrogate.*` keys (the surrogate is always re-loaded from
+    data/metadit/weights/surrogate_model.bin), so those bytes are pure waste.
+    Filtering on the way out makes the two sides symmetric; checkpoints written
+    before this change still load, because the loader's own filter is unchanged.
+    """
+    if objective is None:
+        return None
+    return {k: v for k, v in objective.state_dict().items()
+            if not k.startswith("surrogate.")}
+
+
 def save_checkpoint(path, model, objective, optimizer, scheduler, cfg, global_step,
                     epoch=0, micro_step=0, batch_index=0, is_epoch_end=False, metrics=None, health=None,
                     ema_state=None, best_prediction=None, best_healthy_prediction=None,
@@ -281,7 +299,7 @@ def save_checkpoint(path, model, objective, optimizer, scheduler, cfg, global_st
         "best_prediction": best_prediction,
         "best_healthy_prediction": best_healthy_prediction,
         "model": _saveable(model),
-        "objective_state": objective.state_dict(),
+        "objective_state": saveable_objective_state(objective),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "optimizer_param_shapes": _optimizer_param_shapes(optimizer),
         "scheduler_state": (scheduler.state_dict()
