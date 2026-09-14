@@ -1114,3 +1114,43 @@ only one that acts at all is not settled by this measurement.
 This is a real architectural finding about the shipped model, not a measurement artifact: it is
 reproduced identically across one, two and all known scalars, and the control (the spectrum)
 behaves as expected throughout.
+
+---
+
+## 18. The spectrum-sensitivity gate now exists, and passes (2026-09-13)
+
+`architecture_v5.md` §8.3: *"Test by perturbing the target spectrum slightly with everything else
+fixed and confirming the decoded design changes proportionally, not just that raw latent variance
+looks healthy."* This gate **did not exist** — the evaluator's `diversity_check` runs at
+`perturbation_scale=0`, which its own docstring describes as a determinism check and explicitly
+says must not be presented as generative diversity, and with a positive scale it perturbs the
+latent rather than the target spectrum. Recorded as an open gap since §7; implemented in
+`cf8e361` as `spectrum_sensitivity_probe()` and wired into `run_all_scenarios` as
+`spectrum_sensitivity_A`.
+
+Kernel `anosvol/metasurface-jepa-192d-sensitivity` (v1), commit `cf8e361`, `exit=0`, on the
+full-epoch checkpoint. Perturbation of `scale × per-sample-spectrum-std × fixed noise` applied to
+the TARGET spectrum, everything else fixed:
+
+| scale | geometry relative change | occupancy pixels flipped | predicted fraction shift |
+|---|---|---|---|
+| 0.00 | **0.000000** | **0.000000** | 0.000000 |
+| 0.01 | 0.061872 | 0.004143 | 0.001924 |
+| 0.05 | 0.144901 | 0.023163 | 0.009174 |
+| 0.10 | 0.196073 | 0.041840 | 0.017481 |
+
+`design_moves = True`, `pixels_flipped_monotone_in_scale = True`.
+
+- **Scale 0 moves nothing, exactly** — the probe's own sanity check.
+- **The design tracks the target monotonically**, and a 1 % perturbation already moves it
+  (0.41 % of pixels flip, 6.2 % relative geometry change), rising to 4.2 % of pixels at 10 %.
+- So output-diversity collapse across varying conditions — the Failure Mode 2 that a healthy
+  latent-space metric would not catch — **is not occurring in the shipped model.** This is the one
+  gate the project had never measured, and it is the second positive result after the scenario
+  gates.
+
+The gate blocks on the same run are unchanged (`A` 0.96875 pass, `B` 0.9375 pass, `C` 0.90625
+pass, scalar one-known 0.4375 fail, two-known 0.59375 pass), so the new probe is additive: nothing
+about the earlier readings moved.
+
+**Remaining spec gaps: none.** Every §8.1/§8.3 check now has an implementation and a measurement.
