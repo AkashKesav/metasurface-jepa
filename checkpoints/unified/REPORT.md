@@ -17,7 +17,11 @@ alongside:
 **The scalar rows are noise at n = 32** (binomial SE ≈ 0.088): measured on the full split both
 strata sit at chance, so the correct statement is *scalar dependence is not demonstrated in either
 stratum* (§16) — not the one-pass/one-fail split the 32-sample batch produced, and not the "True"
-the mean criterion reported for both on differences of 0.0006 and 0.0001.
+the mean criterion reported for both on differences of 0.0006 and 0.0001. The cause is now
+localised (§17): the scalar conditioning reaches the scalar encoder's output (summary token moves
+11 %) but does **not** propagate — `scalar_pred` moves **0.000145** under scalar perturbation
+against **0.246** under spectrum perturbation, a factor of ~1,700. The scalar-summary → predictor
+path is effectively dead.
 
 The independent goal probe agrees (real 0.0990 vs shuffled 0.6035, a **6.1×** margin), and the
 win rate on the full 17,488-sample split is **0.9939** (§14).
@@ -1063,3 +1067,50 @@ The old statistic called both strata passing on differences of 0.0006 and 0.0001
   as `REPORT.md` §10.2 did for the goal.
 - The gate as configured at 32 samples **cannot** decide this: at that size the win rate has a
   ±0.176 (95 %) interval, so everything from 0.32 to 0.68 reads as "consistent with chance".
+
+---
+
+## 17. Where the scalar conditioning dies (2026-09-13)
+
+§16 left two hypotheses for the absent scalar dependence: (a) the encoder-side conditioning is
+ignored, or (b) it acts but the known-column substitution masks it before the deployed design.
+Kernel `anosvol/metasurface-jepa-192d-scalar-effect` (v2), commit `3eb38a4`, `exit=0`: perturbing
+the scalar conditioning and the spectrum separately, N = 64, hard stratum, measuring the change at
+every stage with the **spectrum as a calibrated control** (known to act: §10.2).
+
+### 17.1 The effect ratio, stage by stage
+
+Relative change from perturbing the **scalars** vs from perturbing the **spectrum**:
+
+| stage | scalar Δ | spectrum Δ | ratio | one / two / all known |
+|---|---|---|---|---|
+| `scalar_encoder` FiLM params | 0.0150 | — | — | same across strata |
+| `scalar_encoder` summary token | 0.1086 | — | — | same across strata |
+| `z_hat` (predictor output) | 0.0075 | 0.2360 | **0.032** | 0.032 / 0.031 / 0.039 |
+| `scalar_pred` (absolute) | **0.000145** | 0.2457 | **0.0006** | 0.0006 / 0.0006 / 0.0008 |
+| occupancy logits | 0.0028 | 0.3820 | 0.007 | 0.007 / 0.007 / 0.008 |
+| assembled geometry | 0.0324 | 0.4252 | 0.076 | 0.076 / 0.076 / 0.085 |
+| **spectrum error** | **0.000467** | 0.4715 | **0.001** | 0.001 / 0.0005 / 0.002 |
+
+### 17.2 The finding — hypothesis (a), localised
+
+**The conditioning does reach the scalar encoder's output**: perturbing the scalar input moves the
+FiLM parameters and moves the summary token by **11 %** relative — not nothing. **It then fails to
+propagate.** By `z_hat` the effect is 3 % of the spectrum's, and at `scalar_pred` it is
+**0.000145** in absolute terms on scalars whose range is ~2.5–5, i.e. ~0.006 % — indistinguishable
+from zero.
+
+So the signal does not die at the substitution (hypothesis b): it is **already gone before the
+substitution happens**. The scalar prediction is essentially independent of the scalar conditioning
+input, which is exactly what §16 measured downstream and why the gate reads a coin flip.
+
+The asymmetry is the lead: perturbing the **spectrum** moves `scalar_pred` by **0.246** while
+perturbing the **scalars** moves it by **0.000145** — a factor of ~1,700. The scalar-query token
+responds to the spectrum and ignores the scalar-summary token. **The scalar-summary → predictor
+path is effectively dead**, and that is the specific thing to look at; whether the token is
+out-competed in attention, whether the fusion ordering buries it, or whether the FiLM path is the
+only one that acts at all is not settled by this measurement.
+
+This is a real architectural finding about the shipped model, not a measurement artifact: it is
+reproduced identically across one, two and all known scalars, and the control (the spectrum)
+behaves as expected throughout.
