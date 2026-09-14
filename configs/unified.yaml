@@ -126,9 +126,13 @@ eval:
   # gate read real 0.8779 against a full-split mean of 0.1196). The win rate counts
   # samples rather than magnitudes and cannot be decided by one outlier.
   # The mean criterion is still computed and reported as `gate_mean_criterion`.
-  # Threshold 0.5 is the definitional majority; a stricter bar (e.g. 0.75) is a
-  # one-line change if you want the gate to demand a larger majority.
-  gate_beats_fraction_min: 0.5
+  # Threshold 0.75 (operator decision 2026-09-13): "measurably better", not merely
+  # "more often than not". At 0.5 a model right 51% of the time would pass, and the
+  # scalar gates were doing exactly that - two_known reads 0.5938 on the 32-sample
+  # batch and 0.5106 over the full split, with a mean-error difference of 0.0001, so
+  # a majority bar let a null result through. At 0.75 BOTH scalar strata fail, which
+  # is the honest reading and the thing to fix.
+  gate_beats_fraction_min: 0.75
 
 train:
   batch_size: 2

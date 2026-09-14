@@ -137,6 +137,30 @@ def test_objective_state_excludes_the_frozen_surrogate():
         f"surrogate keys must be excluded from the saved objective state: {sorted(sd)}")
     assert saveable_objective_state(None) is None
 
+
+def test_shipped_gate_threshold_is_three_quarters():
+    """Operator decision 2026-09-13: the primary gate demands a 3/4 majority, not a
+    bare majority. At 0.5 a model right 51% of the time passes, and the scalar gates
+    were doing exactly that - two_known reads 0.5938 on the 32-sample batch and
+    0.5106 over the full split with a mean-error difference of 0.0001. At 0.75 both
+    scalar strata fail, which is the honest reading.
+
+    Pinned so a silent change to the bar is caught: it decides gate verdicts.
+    """
+    from train_unified import _validate_config
+
+    cfg = _load_cfg()
+    assert cfg["eval"]["gate_beats_fraction_min"] == 0.75
+    _validate_config(cfg)
+
+    # and the value is actually honoured by the gate
+    from scripts.eval.eval_scenarios import _gate_beats_fraction
+    real = torch.tensor([0.1] * 6 + [0.9] * 4)     # wins 6/10
+    shuf = torch.tensor([0.5] * 10)
+    assert _gate_beats_fraction(real, shuf, 0.75)["gate"] is False, (
+        "a 0.6 win rate must not clear a 0.75 bar")
+    assert _gate_beats_fraction(real, shuf, 0.5)["gate"] is True
+
 def test_real_mode_missing_data_raises():
     """Fix 5: real training with a missing dataset split must raise, never
     silently fall back to synthetic data."""
