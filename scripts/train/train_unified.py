@@ -1321,18 +1321,26 @@ def preflight(cfg, device=None):
     with torch.no_grad():
         wrong_pred = torch.full_like(out["scalar_pred"], 999.0)
 
-        # Locate an occupied pixel per sample from the true occupancy.
-        occ_pixels = occ[:, 0] > 0.5  # (B, 64, 64)
-        occ_idx = occ_pixels.nonzero()
-        assert occ_idx.shape[0] >= b, (
-            "preflight: each sample needs at least one occupied pixel for "
-            "h/r precedence verification")
-
         # KNOWN case: all scalars known → assembly must use scalar_values.
         sk_known = torch.ones(b, 3, dtype=torch.bool, device=device)
-        geom_known, _ = model.decode_geometry(
+        geom_known, occ_known = model.decode_geometry(
             out["z_hat"], wrong_pred, occ_input=occ, mask=M,
             scalar_known=sk_known, scalar_values=sv, hard_forward=True)
+
+        # Locate an occupied pixel per sample from the DECODED occupancy — the same
+        # tensor the geometry was assembled from. This used to read the index from
+        # the TRUE occupancy while reading the value from the model's geometry, so
+        # it only passed while the model happened to reproduce the truth at that
+        # particular pixel; on the first door-(b) run it raised
+        #   "known-scalar precedence violated for h (sample 0: got 0.0, expected 0.85)"
+        # because the decoded occupancy was 0 there and unoccupied pixels carry 0.0.
+        # A precedence check must be evaluated where the ASSEMBLED geometry is
+        # occupied, not where ground truth is.
+        occ_pixels = occ_known[:, 0] > 0.5  # (B, 64, 64)
+        occ_idx = occ_pixels.nonzero()
+        empty = [i for i in range(b) if not bool((occ_idx[:, 0] == i).any())]
+        if empty:
+            checks["precedence_unverifiable_samples"] = empty
         # l via channel 2 (dense).
         l_used = geom_known[:, 2, 0, 0]
         if not torch.allclose(l_used, sv[:, 0] / 3.0, atol=1e-5):
@@ -1341,6 +1349,8 @@ def preflight(cfg, device=None):
                 "did not use scalar_values for known scalars")
         # h via channel 1 on an occupied pixel of each sample.
         for i in range(b):
+            if i in empty:
+                continue          # decoded occupancy empty: nothing to verify on
             px = occ_idx[occ_idx[:, 0] == i][0]
             h_used = geom_known[i, 1, px[1], px[2]].item()
             if abs(h_used - sv[i, 1].item()) > 1e-5:

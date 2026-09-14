@@ -199,7 +199,28 @@ structural divergence would silently skip rather than raise.
 
 ---
 
-## 7. What is not verified
+## 7. Preflight defect found by the door-(b) run
+
+The known-scalar precedence check read its sample index from the **true** occupancy (`occ`) while
+reading the value from the model's assembled geometry (`geom_known`). It therefore only passed while
+the model happened to reproduce the truth at that particular pixel. On the first door-(b) run it
+raised:
+
+```
+RuntimeError: preflight: known-scalar precedence violated for h
+(sample 0: got 0.0, expected 0.8500000238418579)
+```
+
+0.0 is the value of an **unoccupied** pixel in the assembled geometry, so this was the check
+sampling a pixel the model had left empty — not a precedence violation. The check now derives the
+pixel from the DECODED occupancy (the same tensor the geometry was assembled from) and records any
+sample whose decoded occupancy is empty as `precedence_unverifiable_samples` rather than crashing.
+
+Worth noting the implication: the earlier passing runs (B21 preflight, the verification run, the
+sweep, the full epoch) passed this check partly by luck. The property it asserts was never wrong —
+the instrument was.
+
+## 8. What is not verified
 
 - **No gate has passed.** Every gate reading to date is either red or produced by a
   measurement that was too coarse to settle anything. The trap to avoid is reading the
