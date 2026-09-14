@@ -183,7 +183,8 @@ def evaluate_scenario(model, surrogate, occ, sv, spec, mask, scalar_known,
 
 @torch.no_grad()
 def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
-                       scalar_known=None, generator=None, seed=None):
+                       scalar_known=None, generator=None, seed=None,
+                       gate_threshold=0.5):
     """Real/null/shuffled goal dependence (Phase 4/5 MD §10).
 
     Fix 8: uses make_shuffled_spectrum (canonical derangement). Requires
@@ -234,12 +235,11 @@ def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
         results["gap"] = {
             "real_minus_null": results["null"] - results["real"],
             "real_minus_shuffled": results["shuffled"] - results["real"],
-            "gate": results["real"] < results["shuffled"],
+            **_gate_beats_fraction(per_sample["real"], per_sample["shuffled"],
+                                   gate_threshold),
             "n_samples": int(b),
             "paired_diff_mean": float(paired.mean().item()),
             "paired_diff_std": float(paired.std(unbiased=True).item()) if b > 1 else None,
-            "real_beats_shuffled_fraction": float(
-                (per_sample["real"] < per_sample["shuffled"]).float().mean().item()),
             "per_sample_real": [float(v) for v in per_sample["real"]],
             "per_sample_shuffled": [float(v) for v in per_sample["shuffled"]],
         }
@@ -251,9 +251,46 @@ def real_null_shuffled(model, surrogate, occ, sv, spec, mask, device,
     return results
 
 
+def _gate_threshold(cfg):
+    """Primary-gate win-rate threshold (config `eval.gate_beats_fraction_min`)."""
+    return float(cfg.get("eval", {}).get("gate_beats_fraction_min", 0.5))
+
+
+def _gate_beats_fraction(per_sample_real, per_sample_shuffled, threshold):
+    """Primary gate: the PAIRED per-sample win rate (operator decision 2026-09-13).
+
+    The gate used to be `mean(real) < mean(shuffled)` on a batch. Measured on the
+    full validation split (17,488 samples) the error distribution has a heavy
+    tail — 27 samples (0.15 %) score 1–30 while the median is 0.075 — so a single
+    catastrophic sample can flip a mean-based verdict on a small batch, and did:
+    the 32-sample gate read real 0.8779 against a full-split mean of 0.1196.
+
+    The paired win rate counts samples rather than magnitudes, so one outlier
+    cannot decide it: it answers "on how many samples does the true conditioning
+    beat the wrong one?" rather than "by how much on average". Measured here it is
+    0.9939 over the full split.
+
+    Reported alongside, never replacing, the mean difference: a model could in
+    principle win by a hair on most samples and lose badly on a few, which the win
+    rate alone would not show.
+    """
+    wins = float((per_sample_real < per_sample_shuffled).float().mean().item())
+    return {
+        "gate": bool(wins > float(threshold)),
+        "gate_statistic": "real_beats_shuffled_fraction",
+        "gate_threshold": float(threshold),
+        "real_beats_shuffled_fraction": wins,
+        "gate_mean_criterion": bool(
+            float(per_sample_real.mean()) < float(per_sample_shuffled.mean())),
+        "gate_mean_criterion_note": (
+            "secondary: mean(real) < mean(shuffled), reported for continuity but "
+            "no longer the primary statistic (fragile to the error tail)"),
+    }
+
+
 @torch.no_grad()
 def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
-                      scalar_known):
+                      scalar_known, gate_threshold=0.5):
     """Scalar conditioning dependence (Phase 5 MD §8, Fix 9).
 
     Evaluated with a NON-EMPTY known-scalar subset — the all-unknown regime
@@ -269,6 +306,7 @@ def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
         return {"gate": None, "shuffled_infeasible": "batch size < 2"}
 
     results = {}
+    per_sample = {}
     for mode, sv_cond in [
         ("real", sv),
         # Scalar control: derange the scalar conditioning VALUES via the
@@ -285,8 +323,11 @@ def scalar_dependence(model, surrogate, occ, sv, spec, mask, device,
             hard_forward=True)
         spectrum_pred = surrogate(geometry).prediction
         results[mode] = _spectrum_error(spectrum_pred, spec)
+        per_sample[mode] = _spectrum_error_per_sample(
+            spectrum_pred, spec).detach().cpu()
 
-    results["gate"] = results["real"] < results["shuffled"]
+    results.update(_gate_beats_fraction(
+        per_sample["real"], per_sample["shuffled"], gate_threshold))
     return results
 
 
@@ -538,7 +579,7 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
         model, surrogate, occ, sv, spec, M_a, sk_a, device, "A")
     results["scenario_A_rns"] = real_null_shuffled(
         model, surrogate, occ, sv, spec, M_a, device, sk_a,
-        seed=cfg["train"].get("seed", 42) + 1)
+        seed=cfg["train"].get("seed", 42) + 1, gate_threshold=_gate_threshold(cfg))
 
     # Scenario B: partial-parameter (50% mask + some scalars known)
     # Fix 5 (spec §7): construct the known-flags pattern programmatically for
@@ -553,7 +594,7 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
         model, surrogate, occ, sv, spec, M_b, sk_b, device, "B")
     results["scenario_B_rns"] = real_null_shuffled(
         model, surrogate, occ, sv, spec, M_b, device, sk_b,
-        seed=cfg["train"].get("seed", 42) + 2)
+        seed=cfg["train"].get("seed", 42) + 2, gate_threshold=_gate_threshold(cfg))
 
     # Scenario C: retrofit (25% mask + all scalars known)
     sk_c = torch.ones(b, 3, dtype=torch.bool, device=device)
@@ -563,18 +604,20 @@ def run_all_scenarios(cfg, ckpt_path, device, smoke=False, n_samples=None):
         model, surrogate, occ, sv, spec, M_c, sk_c, device, "C")
     results["scenario_C_rns"] = real_null_shuffled(
         model, surrogate, occ, sv, spec, M_c, device, sk_c,
-        seed=cfg["train"].get("seed", 42) + 3)
+        seed=cfg["train"].get("seed", 42) + 3, gate_threshold=_gate_threshold(cfg))
 
     # Scalar dependence on a NON-EMPTY known-scalar stratum (Fix 9):
     # fully-masked occupancy + exactly one known scalar.
     sk_one = torch.zeros(b, 3, dtype=torch.bool, device=device)
     sk_one[:, 0] = True
     results["scalar_dependence_one_known"] = scalar_dependence(
-        model, surrogate, occ, sv, spec, M_a, device, sk_one)
+        model, surrogate, occ, sv, spec, M_a, device, sk_one,
+        gate_threshold=_gate_threshold(cfg))
     sk_two = torch.zeros(b, 3, dtype=torch.bool, device=device)
     sk_two[:, :2] = True
     results["scalar_dependence_two_known"] = scalar_dependence(
-        model, surrogate, occ, sv, spec, M_a, device, sk_two)
+        model, surrogate, occ, sv, spec, M_a, device, sk_two,
+        gate_threshold=_gate_threshold(cfg))
 
     # Diversity
     results["diversity_A"] = diversity_check(

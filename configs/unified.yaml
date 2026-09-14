@@ -118,6 +118,17 @@ data:
 # optimisation choice and must not set the evaluation's statistical power.
 eval:
   n_samples: 32
+  # PRIMARY gate statistic (operator decision 2026-09-13): the paired per-sample
+  # win rate `real < shuffled`, not the batch means. Measured over the full 17,488
+  # sample validation split the error distribution has a heavy tail - 27 samples
+  # (0.15%) score 1-30 while the median is 0.075 - so one catastrophic sample can
+  # flip a mean-based verdict on a small batch and did exactly that (the 32-sample
+  # gate read real 0.8779 against a full-split mean of 0.1196). The win rate counts
+  # samples rather than magnitudes and cannot be decided by one outlier.
+  # The mean criterion is still computed and reported as `gate_mean_criterion`.
+  # Threshold 0.5 is the definitional majority; a stricter bar (e.g. 0.75) is a
+  # one-line change if you want the gate to demand a larger majority.
+  gate_beats_fraction_min: 0.5
 
 train:
   batch_size: 2

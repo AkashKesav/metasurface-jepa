@@ -144,6 +144,12 @@ def _validate_config(cfg):
             f"eval.n_samples={n_eval} < 2: the real-vs-shuffled gate needs at "
             "least two samples for a valid derangement (audit B27)")
 
+    thr = cfg.get("eval", {}).get("gate_beats_fraction_min", 0.5)
+    if not 0.0 <= float(thr) <= 1.0:
+        raise ValueError(
+            f"eval.gate_beats_fraction_min={thr} must be in [0, 1] — it is a "
+            "win-rate threshold for the primary gate statistic")
+
     for w in warnings:
         print(f"[config] WARNING: {w}")
     return warnings

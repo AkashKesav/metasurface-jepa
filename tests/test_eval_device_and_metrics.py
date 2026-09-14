@@ -494,6 +494,38 @@ def test_cfg_guidance_sweep_exercises_cfg_forward():
     assert model.training is True, "cfg_forward must restore the caller's mode"
 
 
+
+def test_primary_gate_is_the_beats_fraction_not_the_mean():
+    """Operator decision 2026-09-13: the primary gate statistic is the paired
+    per-sample win rate, because the error distribution has a heavy tail.
+
+    Measured over the full 17,488-sample validation split: median 0.075 but 27
+    samples (0.15 %) between 1 and 30. A single such sample flips a mean-based
+    verdict on a small batch — the 32-sample gate read real 0.8779 against a
+    full-split mean of 0.1196 — while the win rate counts samples and cannot be
+    decided by one outlier.
+
+    This is the exact scenario: `real` wins 9 of 10 samples by a clear margin and
+    loses one catastrophically, so the MEAN criterion fails while the win rate
+    passes. The gate must follow the win rate.
+    """
+    from scripts.eval.eval_scenarios import _gate_beats_fraction
+
+    real = torch.tensor([0.1] * 9 + [25.0])
+    shuf = torch.tensor([0.6] * 9 + [0.9])
+    assert float(real.mean()) > float(shuf.mean()), (
+        "the constructed case must defeat the mean criterion")
+
+    g = _gate_beats_fraction(real, shuf, 0.5)
+    assert g["gate_mean_criterion"] is False, "the mean criterion fails here"
+    assert abs(g["real_beats_shuffled_fraction"] - 0.9) < 1e-6  # float32
+    assert g["gate"] is True, (
+        "the gate must follow the win rate, not the mean it is meant to replace")
+    assert g["gate_threshold"] == 0.5
+
+    # and the threshold is honoured
+    assert _gate_beats_fraction(real, shuf, 0.95)["gate"] is False
+
 def test_real_null_shuffled_reports_per_sample_statistics():
     """Audit B27: the gate is a PAIRED comparison over samples, so the batch
     means alone are not a result. The evaluator used to inherit its batch size
@@ -524,8 +556,11 @@ def test_real_null_shuffled_reports_per_sample_statistics():
     assert len(gap["per_sample_shuffled"]) == b
     assert 0.0 <= gap["real_beats_shuffled_fraction"] <= 1.0
     assert gap["paired_diff_std"] is not None
-    # the reported gate stays exactly the declared criterion
-    assert gap["gate"] == (res["real"] < res["shuffled"])
+    # the reported gate is the PAIRED WIN RATE (operator decision 2026-09-13),
+    # not the batch means
+    assert gap["gate_statistic"] == "real_beats_shuffled_fraction"
+    assert gap["gate"] == (gap["real_beats_shuffled_fraction"] > gap["gate_threshold"])
+    assert "gate_mean_criterion" in gap
     # the paired mean must equal the difference of the batch means
     assert abs(gap["paired_diff_mean"]
                - (res["shuffled"] - res["real"])) < 1e-6
