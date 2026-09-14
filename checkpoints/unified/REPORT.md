@@ -14,10 +14,13 @@ Two readings that matter more than the headline:
   shuffled) drags the mean to 0.8779. Excluding it, real 0.0980 and the gap widens to +1.1597.
   The gate passes either way, but the median is the honest summary and the outlier is a concrete
   thing to diagnose.
-- **The objective degrades at scale even as the latent improves.** Over the epoch `raw_cos_err`
-  0.999 → 0.827 (better than the 20k plateau) while `L_inv` 1.38 → 8.26 and **`L_cov` 9.2 → 872**
-  (94×) with `L_var` fully satisfied. The `λ_cov = 1` vs `λ_var = 25` imbalance compounds over a
-  full epoch. **This is now the largest open defect**, and the next thing to fix.
+- **The objective does NOT degrade at scale — that reading was mine and it was wrong** (§12.3).
+  The "`L_inv` 1.38 → 8.26, `L_cov` → 872" figure came from validation, which runs the objective
+  in `eval()` mode where the projector's BatchNorm uses stale running statistics; measured
+  train-vs-eval on the same state the gap is **759×** and **364×**. Training's own numbers at step
+  69,990 (`L_inv=0.0069`, `L_cov=2.29`) match the train-mode measurement. `raw_cos_err` did
+  improve over the epoch (0.999 → 0.827, better than the 20k plateau), and `L_cov` is only
+  **3.65 %** of the gradient budget (§13) — so it was never steering training.
 
 The earlier negative readings in §4 were produced by a **2-sample** estimator and are superseded:
 the model was content-sensitive and the measurement could not see it (§11.2).
@@ -778,27 +781,115 @@ This also reconciles the probe-versus-gate discrepancy seen earlier: the probe s
 the evaluator's batch but not the probe's. Neither measurement was wrong; they were different
 samples.
 
-### 12.3 Trajectory over the epoch — the objective degrades even as the raw latent improves
+### 12.3 Trajectory over the epoch, and a correction to the "objective degrades" reading
 
 | quantity | first | last (step 69,950) |
 |---|---|---|
 | `raw_mse` (easy) | 5.8113 | **4.4055** |
 | `raw_cos_err` (easy) | 0.9994 | **0.8271** |
-| `proj_mse` (= `L_inv`, easy) | 1.3822 | **8.2556** |
-| `L_var` (easy) | 0.6005 | **0.0024** |
-| `L_cov` (easy) | 9.2381 | **872.18** |
+| `proj_mse` (= `L_inv`, easy) — **see the correction below** | 1.3822 | 8.2556 |
+| `L_var` (easy) | 0.6005 | 0.0024 |
+| `L_cov` (easy) — **see the correction below** | 9.2381 | 872.18 |
 | `z_hat` norm | 9.6067 | 6.3922 |
 | `z_y` norm | 30.2278 | 27.8660 |
 
 - **The raw representation improves over the full epoch** — `raw_cos_err` 0.999 → 0.827, better
   than the 20k-step plateau (0.859) — so one epoch does buy something the short runs could not.
-- **But the projector-space objective degrades badly**: `L_inv` 1.38 → 8.26 (6× worse) and
-  `L_cov` 9.24 → **872** (94× worse) while `L_var` collapses to 0.0024 (the variance hinge is
-  fully satisfied). At `λ_cov = 1` against `λ_var = 25` the covariance term cannot hold back the
-  variance inflation, and over a full epoch that imbalance compounds. This is the single largest
-  open objective defect and it is now measured at scale rather than inferred.
 - EMA tracking is the best measured yet: **9.2e-05 / 8.6e-05** relative distance (0.009 %).
 - Occupancy collapse did **not** worsen at scale: predicted fraction `0.4305 ± 0.0776` against a
   true 0.3989 — better spread than the 10k-step λ=3.32 arm's 0.0364.
 - CFG: `w=0` 0.5632, `w=0.5` 0.4164, `w=1` 0.8779, `w≥2` 10.0–16.5. Still "no guidance is best",
   and the non-monotonicity is again the outlier in scenario A, not a change in the model.
+
+> **Correction (recorded rather than silently edited).** This section previously read "the
+> objective degrades badly at scale — `L_inv` 1.38 → 8.26, `L_cov` → 872 — the single largest open
+> objective defect". **That was wrong, and the whole claim came from reading an eval-mode number
+> as if it were the training objective.**
+>
+> `validate()` runs the objective under `eval()`, where the projector's two `BatchNorm1d` layers
+> use their accumulated **running** statistics instead of batch statistics. Measured at the final
+> checkpoint on one batch, same state, projector in each mode:
+>
+> | term | projector `train()` | projector `eval()` | ratio | validation reported |
+> |---|---|---|---|---|
+> | `L_inv` | 0.011127 | 8.446861 | **759×** | 8.2556 |
+> | `L_cov` | 1.989043 | 724.186768 | **364×** | 872.18 |
+> | `L_var` | 0.000613 | 0.000386 | 0.6× | 0.0024 |
+>
+> The eval-mode values reproduce what validation printed, and the training log at step 69,990
+> reads `L_inv=0.0069 L_cov=2.2886` — which the train-mode measurement matches. So **training was
+> healthy and the trajectory column was measuring a different function.** The mechanism: the one
+> shared projector is applied to TWO different distributions (the predictor's output and the EMA
+> target's output), and its running statistics average the two, fitting neither — hence a 364–759×
+> eval/train gap.
+>
+> **Why it matters beyond the number**: the projectors' outputs are training-only machinery, so
+> nothing deployed is affected. But it means every `L_inv`/`L_cov` figure this project has quoted
+> from a validation block is a train-mode quantity reported as an eval-mode one, and cannot be used
+> to judge the training objective. `L_cov` in particular is **3.65 %** of the gradient budget at the
+> final state (§13), so neither it nor its 872 were ever the thing steering training.
+>
+> **Open, and separate**: a projector whose `BatchNorm` normalizes each branch by its own batch
+> statistics can make the invariance loss small without the raw representations being aligned —
+> measured here as `L_inv` (train) `0.011` against `raw_mse` `4.41` / `raw_cos_err` `0.83`. That is
+> the projector-absorption mechanism of §7.4 with a concrete candidate cause, and it needs its own
+> ablation before anything changes; it is not established by this measurement.
+
+---
+
+## 13. Post-hoc diagnosis of the full-epoch checkpoint (2026-09-13)
+
+Kernel `anosvol/metasurface-jepa-192d-outlier-diag` (v4), read-only, no training. The checkpoint
+was recovered from the full-epoch kernel's output and re-published as the private dataset
+`anosvol/metasurface-jepa-192d-full-epoch-ckpt` (188 MB), so the trained artifact can be analysed
+without paying the 2 h 10 m re-train. Runs in ~4 min (mostly the torch pin install).
+
+### 13.1 Per-term gradient share at the final state — the λ decision input
+
+Measured at step 69,999 on a real batch, each term differentiated ALONE (projector restored from
+the checkpoint — `objective_state`, 15 keys, nothing missing):
+
+| term | λ | value | ‖∇L‖ (unweighted) | λ·‖∇L‖ | **share of gradient budget** |
+|---|---|---|---|---|---|
+| **`L_phys`** | 3.32 | 0.045799 | 4.2971 | 14.2663 | **66.15 %** |
+| `L_scalar` | 1.0 | 0.021801 | 2.6081 | 2.6081 | 12.09 % |
+| `L_inv` | 25.0 | 0.011127 | 0.0839 | 2.0979 | 9.73 % |
+| `L_occ` | 1.0 | 0.257898 | 0.9690 | 0.9690 | 4.49 % |
+| `L_var` | 25.0 | 0.000613 | 0.0335 | 0.8381 | 3.89 % |
+| `L_cov` | 1.0 | 1.989043 | 0.7867 | 0.7867 | **3.65 %** |
+
+Conclusions, and the decisions they support:
+
+- **`λ_cov` is NOT to be touched.** At 3.65 % of the gradient budget — third-smallest — and with a
+  value of `1.99` (not 872) on a real batch at the final state, re-weighting it would be tuning a
+  term that barely steers training. The "`λ_cov = 1` vs `λ_var = 25` imbalance" story that the
+  earlier reading suggested is dead: the two are 3.65 % and 3.89 %, i.e. equally minor.
+- **`λ_phys = 3.32` already dominates the gradient budget at 66 %.** The sweep's trend (higher λ →
+  lower hard-stratum error, still rising at the top of the range) still argues for checking above
+  3.32, but the *upside is bounded* and the risk is real: invariance is down to 9.7 %, so further
+  physics weight starves the representation objectives. Treat an upward extension as a bounded
+  check expecting diminishing returns, not the obvious win it looked like from the error curve
+  alone.
+- **N-dependence of `L_cov` is real but small**: 4.746 → 3.632 → 1.989 as the masked-token count
+  goes 126 → 256 → 512 (N/D 0.66 → 2.67). A 2.4× range — it explains part of the eval-mode
+  inflation in principle, but nowhere near the measured 364×, which the BatchNorm mode accounts
+  for (§12.3).
+
+### 13.2 The scenario-A outlier is NOT a data pathology
+
+Reproducing the evaluator's exact batch (seed 42, 32 samples), the worst sample and the median
+sample:
+
+| batch pos | split index | true occ. frac | pred occ. frac | spectrum std | err real | err shuffled | scalars |
+|---|---|---|---|---|---|---|---|
+| **7** | **7176** | 0.4766 | 0.4486 | 0.4839 | **25.0568** | 0.8818 | [2.79, 0.99, 4.9] |
+| 8 | 12136 | 0.4355 | 0.4394 | 0.6068 | 0.2227 | 0.6139 | [2.81, 0.88, 4.97] |
+| 3 | 10702 | 0.4141 | 0.3628 | 0.5695 | 0.2222 | 0.7117 | [2.52, 0.94, 4.87] |
+| 1 (median) | 8846 | 0.4805 | 0.4848 | 0.5953 | 0.0800 | 0.3727 | [2.85, 0.52, 4.42] |
+
+Its occupancy, predicted occupancy, spectrum std and scalars are all inside the normal range, and
+the batch contains **no** empty or near-empty occupancies (`n_occ_frac_zero = 0`,
+`n_occ_frac_below_0.01 = 0`, spectrum std range 0.484–0.688). So the failure is **not** degenerate
+input: the model maps that particular spectrum to a catastrophic design while a *different*
+spectrum on the same sample yields 0.88. It is an instability hole in the learned inverse map —
+specific and diagnosable, unlike the aggregate "one sample is bad" reading.
